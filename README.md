@@ -47,6 +47,7 @@ All time-aware tools accept these shared filters:
 | `period` | `today` · `yesterday` · `week` · `month` · `year` · single date `YYYY-MM-DD` · inclusive range `YYYY-MM-DD..YYYY-MM-DD` |
 | `hour_start` / `hour_end` | Inclusive / exclusive hour-of-day filter in local time (e.g. `9` and `17` = working hours) |
 | `weekdays` | Array of weekday integers (0=Sun, 1=Mon, …, 6=Sat). Pass `[1,2,3,4,5]` for weekdays only. |
+| `device` | `current` (the local machine), a device UUID from `get_device_breakdown`, or a platform name (`darwin`, `win32`, `browser-extension`). Omit for all devices. |
 
 Every total is split into **active** foreground time and **passive** away-listening time (e.g. background music while idle), matching the dashboard's distinction.
 

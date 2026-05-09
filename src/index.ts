@@ -31,6 +31,7 @@ const PERIOD_DESCRIPTION =
 const HOUR_START_DESC = "Inclusive start hour 0-24 in local time. Combine with hour_end (e.g. 9 and 17 = 9am to 4:59pm). Omit both for no hour filter.";
 const HOUR_END_DESC = "Exclusive end hour 0-24 in local time. Combine with hour_start.";
 const WEEKDAYS_DESC = "Restrict to specific weekdays. 0=Sunday, 1=Monday, …, 6=Saturday. Omit or pass [0,1,2,3,4,5,6] for no weekday filter.";
+const DEVICE_DESC = "Restrict to a single device. Pass 'current' (or 'this') for the local machine, a device UUID from get_device_breakdown, or a platform name like 'darwin', 'win32', 'browser-extension'. Omit or pass 'all' for no device filter.";
 
 function pickTimeFilters(args: {
   hour_start?: number; hour_end?: number; weekdays?: number[];
@@ -72,7 +73,7 @@ const SERVER_ICONS = [
 
 const server = new McpServer({
   name: "vetroscope-mcp",
-  version: "0.3.0",
+  version: "0.4.0",
   title: "Vetroscope",
   description:
     "Read-only access to your local Vetroscope time-tracking database — apps, projects, goals, and individual sessions.",
@@ -109,6 +110,7 @@ server.registerTool(
       hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
       hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
       weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
+      device: z.string().optional().describe(DEVICE_DESC),
     },
   },
   async (args) =>
@@ -117,6 +119,7 @@ server.registerTool(
       topProjects: args.top_projects,
       topSubProjects: args.top_sub_projects,
       timeFilters: pickTimeFilters(args),
+      device: args.device,
     }))
 );
 
@@ -134,10 +137,11 @@ server.registerTool(
       hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
       hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
       weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
+      device: z.string().optional().describe(DEVICE_DESC),
     },
   },
   async (args) =>
-    asJson(getAppBreakdown(db(), args.app, args.period, args.limit, args.top_sub_projects, pickTimeFilters(args)))
+    asJson(getAppBreakdown(db(), args.app, args.period, args.limit, args.top_sub_projects, pickTimeFilters(args), args.device))
 );
 
 server.registerTool(
@@ -171,6 +175,7 @@ server.registerTool(
       hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
       hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
       weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
+      device: z.string().optional().describe(DEVICE_DESC),
       limit: z.number().int().min(1).max(5000).optional(),
     },
   },
@@ -182,6 +187,7 @@ server.registerTool(
     search: args.search,
     mode: args.mode,
     timeFilters: pickTimeFilters(args),
+    device: args.device,
     limit: args.limit,
   }))
 );
@@ -211,6 +217,7 @@ server.registerTool(
       hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
       hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
       weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
+      device: z.string().optional().describe(DEVICE_DESC),
     },
   },
   async (args) => {
@@ -220,6 +227,7 @@ server.registerTool(
       topApps: args.top_apps,
       topProjects: args.top_projects,
       timeFilters: pickTimeFilters(args),
+      device: args.device,
     });
     if (!result) {
       return {
@@ -240,10 +248,11 @@ server.registerTool(
     inputSchema: {
       app: z.string().describe("Exact app name as recorded by Vetroscope (canonical, not display_name)."),
       period: z.string().describe(PERIOD_DESCRIPTION + ". Defaults to 'week'.").default("week"),
+      device: z.string().optional().describe(DEVICE_DESC),
     },
   },
-  async ({ app, period }) => {
-    const result = getAppStats(db(), app, period);
+  async ({ app, period, device }) => {
+    const result = getAppStats(db(), app, period, device);
     if (!result) {
       return {
         content: [{ type: "text" as const, text: `No entries found for app "${app}". Use get_report to see canonical app names.` }],
@@ -282,12 +291,13 @@ server.registerTool(
       hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
       hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
       weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
+      device: z.string().optional().describe(DEVICE_DESC),
       limit: z.number().int().min(1).max(5000).optional().describe("Max sessions returned (default 200)"),
     },
   },
   async (args) =>
     asJson(getSessions(db(), args.period, {
-      app: args.app, project: args.project, tag: args.tag,
+      app: args.app, project: args.project, tag: args.tag, device: args.device,
       minSeconds: args.min_seconds, limit: args.limit,
       timeFilters: pickTimeFilters(args),
     }))
@@ -339,9 +349,10 @@ server.registerTool(
       "Dense per-day series of active and passive seconds for a period. Default period is 'year' for the GitHub-contribution-grid heatmap; pass any other period for narrower windows. Days with zero activity are explicitly included so streak / longest-gap analysis is straightforward.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION + ". Defaults to 'year'.").default("year"),
+      device: z.string().optional().describe(DEVICE_DESC),
     },
   },
-  async ({ period }) => asJson(getCalendar(db(), period))
+  async ({ period, device }) => asJson(getCalendar(db(), period, device))
 );
 
 server.registerTool(
