@@ -79,7 +79,7 @@ const SERVER_ICONS = [
 
 const server = new McpServer({
   name: "vetroscope-mcp",
-  version: "1.0.0",
+  version: "1.0.1",
   title: "Vetroscope",
   description:
     "Read-only access to your local Vetroscope time-tracking database — apps, projects, goals, and individual sessions.",
@@ -107,7 +107,7 @@ server.registerTool(
   {
     title: "Get time report",
     description:
-      "Aggregate Vetroscope time report for a period: total active seconds, top apps, and top projects (with sub-projects nested when present — e.g. individual YouTube videos, SoundCloud songs, Netflix episodes). Apps include the user's custom display_name when set. Optional hour-of-day / weekday filters narrow to working hours, weekends, etc. Mirrors the desktop dashboard.",
+      "Aggregate Vetroscope time report for a period: total active seconds, top apps, and top projects (with sub-projects nested when present — e.g. individual YouTube videos, SoundCloud songs, Netflix episodes). Apps include the user's custom display_name when set. Applies the same SQLite settings as the desktop dashboard — ignored apps, ignored projects/breakdown patterns, and days_filter — plus optional hour-of-day/weekday/device filters layered on top. Totals therefore match Charts/Dashboard totals for the same range.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).default("today"),
       top_apps: z.number().int().min(0).max(500).optional().describe("Max apps returned (default 50, 0 to omit)"),
@@ -168,7 +168,7 @@ server.registerTool(
   {
     title: "Query raw entries",
     description:
-      "Filtered list of raw tracking entries. Useful for digging into specific projects, tags, or finding what window titles appeared. Defaults to active foreground entries only — pass mode='passive' or 'all' to include away-listening (background music while idle). Returns at most 5000 rows; default 200.",
+      "Filtered list of raw tracking entries. Useful for digging into specific projects, tags, or finding what window titles appeared. When a period is set, respects the same dashboard exclusions stored in SQLite (ignored apps/projects/breakdown patterns, days_filter) plus optional hour/device filters so aggregates stay consistent with Charts; omit period to bypass those scope rules while still filtering by tag/app/search/etc. Defaults to active foreground entries only — pass mode='passive' or 'all' to include away-listening (background music while idle). Returns at most 5000 rows; default 200.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).optional(),
       app: z.string().optional().describe("Restrict to a single app name (canonical name, not display_name)"),

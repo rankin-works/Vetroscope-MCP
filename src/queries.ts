@@ -5,8 +5,14 @@ import { categorizeApp, CATEGORY_LABELS, type AppCategory } from "./categories.j
 /**
  * Vetroscope polls every 30s. The dashboard computes durations as the count
  * of distinct 30s buckets that contain at least one foreground entry — this
- * matches the desktop app's reported totals exactly. Source of truth lives
- * in `electron/database.ts` (POLL_INTERVAL_SECONDS).
+ * matches the desktop app's reported totals. Source of truth lives in
+ * `electron/database.ts` (POLL_INTERVAL_SECONDS).
+ *
+ * Period aggregations (`get_report` and siblings) honor the **same SQLite
+ * filter stack** as the desktop report: ignored apps, ignored projects +
+ * breakdown patterns, the `days_filter` setting (`weekdays` / `weekends` /
+ * `all`), distinct-bucket rounding, passive-row rules, optional device /
+ * MCP hour/weekday filters layered on top.
  */
 const POLL_SECONDS = 30;
 const BUCKET_EXPR = `(CAST(strftime('%s', e.timestamp) AS INTEGER) / ${POLL_SECONDS})`;
@@ -113,6 +119,130 @@ function ignoredAppsClause(ignored: string[], alias = "e"): { clause: string; pa
   return {
     clause: ` AND ${alias}.app_name NOT IN (${placeholders})`,
     params: ignored,
+  };
+}
+
+/** Exact (app, project) pairs the user excludes from reports — see `ignored_projects` in Vetroscope settings. */
+interface IgnoredProjectRow {
+  appName: string;
+  project: string;
+}
+
+/** Per-app substring/extension patterns excluded from breakdowns — `ignored_breakdown_patterns`. */
+interface IgnoredBreakdownPatternRow {
+  appName: string;
+  pattern: string;
+}
+
+function getIgnoredProjects(db: Database.Database): IgnoredProjectRow[] {
+  const v = readJsonSetting<unknown>(db, "ignored_projects", []);
+  if (!Array.isArray(v)) return [];
+  const out: IgnoredProjectRow[] = [];
+  for (const x of v) {
+    if (!x || typeof x !== "object") continue;
+    const o = x as Record<string, unknown>;
+    if (typeof o.appName === "string" && typeof o.project === "string") {
+      out.push({ appName: o.appName, project: o.project });
+    }
+  }
+  return out;
+}
+
+function getIgnoredBreakdownPatterns(db: Database.Database): IgnoredBreakdownPatternRow[] {
+  const v = readJsonSetting<unknown>(db, "ignored_breakdown_patterns", []);
+  if (!Array.isArray(v)) return [];
+  return v.filter(
+    (p): p is IgnoredBreakdownPatternRow =>
+      !!p
+      && typeof p === "object"
+      && typeof (p as IgnoredBreakdownPatternRow).appName === "string"
+      && typeof (p as IgnoredBreakdownPatternRow).pattern === "string"
+      && (p as IgnoredBreakdownPatternRow).pattern.length > 0,
+  );
+}
+
+function escapeLike(input: string): string {
+  return input.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+function patternToLike(raw: string): string {
+  const trimmed = raw.trim();
+  const escaped = escapeLike(trimmed.toLowerCase());
+  if (trimmed.startsWith(".")) return `%${escaped}`;
+  return `%${escaped}%`;
+}
+
+/**
+ * Same logic as `buildIgnoredProjectsFilter` in the desktop app: drop ignored
+ * project tuples and pattern-matched breakdown rows from report totals.
+ */
+function buildIgnoredProjectsClause(
+  db: Database.Database,
+  alias = "e",
+): { clause: string; params: string[] } {
+  const ignoredProjects = getIgnoredProjects(db);
+  const patterns = getIgnoredBreakdownPatterns(db);
+  const prefix = alias ? `${alias}.` : "";
+  const clauses: string[] = [];
+  const params: string[] = [];
+  for (const p of ignoredProjects) {
+    clauses.push(`NOT (${prefix}app_name = ? AND ${prefix}project = ?)`);
+    params.push(p.appName, p.project);
+  }
+  for (const p of patterns) {
+    clauses.push(
+      `NOT (${prefix}app_name = ? AND ${prefix}project IS NOT NULL AND LOWER(${prefix}project) LIKE ? ESCAPE '\\')`,
+    );
+    params.push(p.appName, patternToLike(p.pattern));
+  }
+  if (clauses.length === 0) return { clause: "", params: [] };
+  return { clause: ` AND ${clauses.join(" AND ")}`, params };
+}
+
+function getSetting(db: Database.Database, key: string): string | null {
+  try {
+    const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Mirrors `buildDaysFilter` in `electron/database.ts` (`days_filter` setting). */
+function dashboardDaysClause(db: Database.Database, alias = "e"): string {
+  const pref = getSetting(db, "days_filter") || "all";
+  const col = alias ? `${alias}.timestamp` : "timestamp";
+  if (pref === "weekdays") {
+    return ` AND CAST(strftime('%w', ${col}, 'localtime') AS INTEGER) BETWEEN 1 AND 5`;
+  }
+  if (pref === "weekends") {
+    return ` AND CAST(strftime('%w', ${col}, 'localtime') AS INTEGER) IN (0, 6)`;
+  }
+  return "";
+}
+
+/**
+ * Everything the desktop dashboard layers on top of the date range before
+ * bucket-aggregating: ignored apps, ignored projects / patterns, device,
+ * `days_filter`, and optional MCP hour/weekday filters. Order and params
+ * match `electron/database.ts` report queries.
+ */
+function dashboardEntryClauseAndParams(
+  db: Database.Database,
+  alias = "e",
+  opts: { timeFilters?: TimeFilters; device?: string } = {},
+): { clause: string; params: (string | number)[] } {
+  const ignored = getIgnoredApps(db);
+  const { clause: iC, params: iP } = ignoredAppsClause(ignored, alias);
+  const { clause: projC, params: projP } = buildIgnoredProjectsClause(db, alias);
+  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device, alias);
+  const daysC = dashboardDaysClause(db, alias);
+  const { clause: tC, params: tP } = buildTimeFilters(opts.timeFilters, alias);
+  return {
+    clause: `${iC}${projC}${dC}${daysC}${tC}`,
+    params: [...iP, ...projP, ...dP, ...tP],
   };
 }
 
@@ -261,7 +391,11 @@ export interface ReportResult {
   sublabel: string;
   start: string;
   end: string;
-  /** Active foreground seconds across all apps — matches the Vetroscope dashboard headline. */
+  /**
+   * Active foreground seconds across all apps — matches the dashboard headline
+   * when nothing is filtered differently in the MCP (same knobs as desktop:
+   * ignored apps/projects/patterns, `days_filter`, device, optional hour/weekday tools).
+   */
   totalSeconds: number;
   /** Background away-listening seconds across all apps. */
   totalPassiveSeconds: number;
@@ -281,12 +415,12 @@ export function getReport(
   } = {}
 ): ReportResult {
   const range = parsePeriod(period);
-  const ignored = getIgnoredApps(db);
-  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
-  const { clause: tC, params: tP } = buildTimeFilters(opts.timeFilters);
-  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device);
-  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${iC}${tC}${dC}`;
-  const baseParams = [range.start, range.end, ...iP, ...tP, ...dP];
+  const dash = dashboardEntryClauseAndParams(db, "e", {
+    timeFilters: opts.timeFilters,
+    device: opts.device,
+  });
+  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${dash.clause}`;
+  const baseParams = [range.start, range.end, ...dash.params];
   const active = activeFilter(db);
   const passive = passiveFilter(db);
   const displayNames = loadDisplayNames(db);
@@ -405,8 +539,8 @@ export function getReport(
 
 /**
  * Populate `subProjects` on each entry of `projMap`. Mutates in place.
- * `whereClause` and `whereParams` describe the time/ignored filter — same
- * shape used by the parent project query so the totals line up.
+ * `whereClause` and `whereParams` describe the dashboard filter stack + date
+ * range — same shape used by the parent project query so totals line up.
  */
 function attachSubProjects(
   db: Database.Database,
@@ -490,10 +624,9 @@ export function getAppBreakdown(
   device?: string,
 ): AppBreakdownResult {
   const range = parsePeriod(period);
-  const { clause: tC, params: tP } = buildTimeFilters(timeFilters);
-  const { clause: dC, params: dP } = resolveDeviceFilter(db, device);
-  const where = `e.timestamp >= ? AND e.timestamp < ? AND e.app_name = ?${tC}${dC}`;
-  const params = [range.start, range.end, app, ...tP, ...dP];
+  const dash = dashboardEntryClauseAndParams(db, "e", { timeFilters, device });
+  const where = `e.timestamp >= ? AND e.timestamp < ?${dash.clause} AND e.app_name = ?`;
+  const params = [range.start, range.end, ...dash.params, app];
   const active = activeFilter(db);
   const passive = passiveFilter(db);
   const displayNames = loadDisplayNames(db);
@@ -594,8 +727,7 @@ function goalsTableHasTagId(db: Database.Database): boolean {
 
 export function getGoalsProgress(db: Database.Database, period = "today"): GoalProgress[] {
   const range = parsePeriod(period);
-  const ignored = getIgnoredApps(db);
-  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
+  const dash = dashboardEntryClauseAndParams(db, "e", {});
   const hasTagId = goalsTableHasTagId(db);
   const active = activeFilter(db);
 
@@ -625,27 +757,27 @@ export function getGoalsProgress(db: Database.Database, period = "today"): GoalP
         .prepare(
           `SELECT ${SECONDS_EXPR} AS seconds
              FROM entries e
-            WHERE e.timestamp >= ? AND e.timestamp < ?${iC}${active}`
+            WHERE e.timestamp >= ? AND e.timestamp < ?${dash.clause}${active}`
         )
-        .get(range.start, range.end, ...iP) as { seconds: number | null };
+        .get(range.start, range.end, ...dash.params) as { seconds: number | null };
       current = row.seconds ?? 0;
     } else if (g.type === "tag" && g.tagId != null) {
       const row = db
         .prepare(
           `SELECT ${SECONDS_EXPR} AS seconds
              FROM entries e
-            WHERE e.timestamp >= ? AND e.timestamp < ? AND e.tag_id = ?${active}`
+            WHERE e.timestamp >= ? AND e.timestamp < ? AND e.tag_id = ?${dash.clause}${active}`
         )
-        .get(range.start, range.end, g.tagId) as { seconds: number | null };
+        .get(range.start, range.end, g.tagId, ...dash.params) as { seconds: number | null };
       current = row.seconds ?? 0;
     } else if (g.type === "app" && g.app) {
       const row = db
         .prepare(
           `SELECT ${SECONDS_EXPR} AS seconds
              FROM entries e
-            WHERE e.timestamp >= ? AND e.timestamp < ? AND e.app_name = ?${active}`
+            WHERE e.timestamp >= ? AND e.timestamp < ? AND e.app_name = ?${dash.clause}${active}`
         )
-        .get(range.start, range.end, g.app) as { seconds: number | null };
+        .get(range.start, range.end, g.app, ...dash.params) as { seconds: number | null };
       current = row.seconds ?? 0;
     }
     const percent = g.targetSeconds > 0 ? (current / g.targetSeconds) * 100 : 0;
@@ -712,6 +844,26 @@ export function queryEntries(db: Database.Database, args: QueryEntriesArgs): Ent
     where.push("e.timestamp >= ?");
     where.push("e.timestamp < ?");
     params.push(range.start, range.end);
+    const dash = dashboardEntryClauseAndParams(db, "e", {
+      timeFilters: args.timeFilters,
+      device: args.device,
+    });
+    if (dash.clause) {
+      where.push(dash.clause.replace(/^ AND /, ""));
+      params.push(...dash.params);
+    }
+  }
+  else {
+    const { clause: tfC, params: tfP } = buildTimeFilters(args.timeFilters);
+    if (tfC) {
+      where.push(tfC.replace(/^ AND /, ""));
+      params.push(...tfP);
+    }
+    const { clause: dfC, params: dfP } = resolveDeviceFilter(db, args.device);
+    if (dfC) {
+      where.push(dfC.replace(/^ AND /, ""));
+      params.push(...dfP);
+    }
   }
   if (args.app) {
     where.push("e.app_name = ?");
@@ -736,16 +888,6 @@ export function queryEntries(db: Database.Database, args: QueryEntriesArgs): Ent
   if (hasPassive) {
     if (mode === "active") where.push("e.is_passive = 0");
     else if (mode === "passive") where.push("e.is_passive = 1");
-  }
-  const { clause: tfC, params: tfP } = buildTimeFilters(args.timeFilters);
-  if (tfC) {
-    where.push(tfC.replace(/^ AND /, ""));
-    params.push(...tfP);
-  }
-  const { clause: dfC, params: dfP } = resolveDeviceFilter(db, args.device);
-  if (dfC) {
-    where.push(dfC.replace(/^ AND /, ""));
-    params.push(...dfP);
   }
 
   const passiveSelect = hasPassive ? "e.is_passive AS isPassive" : "0 AS isPassive";
@@ -850,12 +992,12 @@ export function getTagBreakdown(
   const tag = resolveTag(db, identifier);
   if (!tag) return null;
   const range = parsePeriod(period);
-  const ignored = getIgnoredApps(db);
-  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
-  const { clause: tC, params: tP } = buildTimeFilters(opts.timeFilters);
-  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device);
-  const where = `e.timestamp >= ? AND e.timestamp < ? AND e.tag_id = ?${iC}${tC}${dC}`;
-  const params = [range.start, range.end, tag.id, ...iP, ...tP, ...dP];
+  const dash = dashboardEntryClauseAndParams(db, "e", {
+    timeFilters: opts.timeFilters,
+    device: opts.device,
+  });
+  const where = `e.timestamp >= ? AND e.timestamp < ? AND e.tag_id = ?${dash.clause}`;
+  const params = [range.start, range.end, tag.id, ...dash.params];
   const active = activeFilter(db);
   const passive = passiveFilter(db);
   const displayNames = loadDisplayNames(db);
@@ -1003,7 +1145,7 @@ export function getAppStats(
   const passive = passiveFilter(db);
   const displayNames = loadDisplayNames(db);
   const dn = displayNames.get(app) ?? null;
-  const { clause: dC, params: dP } = resolveDeviceFilter(db, device);
+  const dash = dashboardEntryClauseAndParams(db, "e", { device });
 
   // Lifetime stats — no period filter, just app filter.
   const lifetimeRow = db
@@ -1013,16 +1155,16 @@ export function getAppStats(
               MAX(e.timestamp) AS lastSeen,
               COUNT(DISTINCT DATE(e.timestamp, 'localtime')) AS daysActive
          FROM entries e
-        WHERE e.app_name = ?${dC}${active}`
+        WHERE e.app_name = ?${dash.clause}${active}`
     )
-    .get(app, ...dP) as { seconds: number | null; firstSeen: string | null; lastSeen: string | null; daysActive: number };
+    .get(app, ...dash.params) as { seconds: number | null; firstSeen: string | null; lastSeen: string | null; daysActive: number };
   if (!lifetimeRow.seconds) return null;
   const lifetimePassive = db
-    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE e.app_name = ?${dC}${passive}`)
-    .get(app, ...dP) as { seconds: number | null };
+    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE e.app_name = ?${dash.clause}${passive}`)
+    .get(app, ...dash.params) as { seconds: number | null };
 
-  const periodWhere = `e.app_name = ? AND e.timestamp >= ? AND e.timestamp < ?${dC}`;
-  const periodParams = [app, range.start, range.end, ...dP];
+  const periodWhere = `e.app_name = ? AND e.timestamp >= ? AND e.timestamp < ?${dash.clause}`;
+  const periodParams = [app, range.start, range.end, ...dash.params];
 
   const periodActive = db
     .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${periodWhere}${active}`)
@@ -1224,15 +1366,19 @@ export function getSessions(
   } = {}
 ): Session[] {
   const range = parsePeriod(period);
-  const { clause: tC, params: tP } = buildTimeFilters(opts.timeFilters);
-  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device);
+  const dash = dashboardEntryClauseAndParams(db, "e", {
+    timeFilters: opts.timeFilters,
+    device: opts.device,
+  });
   const where: string[] = ["e.timestamp >= ?", "e.timestamp < ?"];
   const params: (string | number)[] = [range.start, range.end];
+  if (dash.clause) {
+    where.push(dash.clause.replace(/^ AND /, ""));
+    params.push(...dash.params);
+  }
   if (opts.app) { where.push("e.app_name = ?"); params.push(opts.app); }
   if (opts.project) { where.push("e.project = ?"); params.push(opts.project); }
   if (opts.tag) { where.push("t.name = ?"); params.push(opts.tag); }
-  if (tC) { where.push(tC.replace(/^ AND /, "")); params.push(...tP); }
-  if (dC) { where.push(dC.replace(/^ AND /, "")); params.push(...dP); }
 
   const hasPassive = hasPassiveColumn(db);
   const hasSubProj = hasSubProjectColumn(db);
@@ -1565,13 +1711,11 @@ export interface CalendarResult extends Range {
  */
 export function getCalendar(db: Database.Database, period = "year", device?: string): CalendarResult {
   const range = parsePeriod(period);
-  const ignored = getIgnoredApps(db);
-  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
-  const { clause: dC, params: dP } = resolveDeviceFilter(db, device);
+  const dash = dashboardEntryClauseAndParams(db, "e", { device });
   const active = activeFilter(db);
   const passive = passiveFilter(db);
-  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${iC}${dC}`;
-  const baseParams = [range.start, range.end, ...iP, ...dP];
+  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${dash.clause}`;
+  const baseParams = [range.start, range.end, ...dash.params];
 
   const activeRows = db
     .prepare(
@@ -1645,6 +1789,7 @@ export function getDeviceBreakdown(
   period = "month",
 ): DeviceBreakdownResult {
   const range = parsePeriod(period);
+  const dash = dashboardEntryClauseAndParams(db, "e", {});
   const cols = db.prepare(`PRAGMA table_info(entries)`).all() as Array<{ name: string }>;
   const hasDevice = cols.some((c) => c.name === "device_id");
   const hasPlatform = cols.some((c) => c.name === "platform");
@@ -1654,15 +1799,15 @@ export function getDeviceBreakdown(
     const total = db
       .prepare(
         `SELECT ${SECONDS_EXPR} AS seconds FROM entries e
-           WHERE e.timestamp >= ? AND e.timestamp < ?${activeFilter(db)}`
+           WHERE e.timestamp >= ? AND e.timestamp < ?${dash.clause}${activeFilter(db)}`
       )
-      .get(range.start, range.end) as { seconds: number | null };
+      .get(range.start, range.end, ...dash.params) as { seconds: number | null };
     return { ...range, totalSeconds: total.seconds ?? 0, devices: [] };
   }
   const active = activeFilter(db);
   const passive = passiveFilter(db);
-  const where = `e.timestamp >= ? AND e.timestamp < ? AND e.device_id IS NOT NULL`;
-  const params = [range.start, range.end];
+  const where = `e.timestamp >= ? AND e.timestamp < ? AND e.device_id IS NOT NULL${dash.clause}`;
+  const params = [range.start, range.end, ...dash.params];
 
   const activeRows = db
     .prepare(
@@ -1810,17 +1955,17 @@ export function getMusicSplit(
   } = {}
 ): MusicSplitResult {
   const range = parsePeriod(period);
-  const ignored = getIgnoredApps(db);
-  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
-  const { clause: tfC, params: tfP } = buildTimeFilters(opts.timeFilters);
-  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device);
+  const dash = dashboardEntryClauseAndParams(db, "e", {
+    timeFilters: opts.timeFilters,
+    device: opts.device,
+  });
 
   const musicApps = opts.musicApps ?? DEFAULT_MUSIC_APPS;
   const musicBrowserProjects = opts.musicBrowserProjects ?? DEFAULT_MUSIC_BROWSER_PROJECTS;
   const browserApps = opts.browserApps ?? DEFAULT_BROWSER_APPS;
 
-  const baseTimeWhere = `e.timestamp >= ? AND e.timestamp < ?${iC}${tfC}${dC}`;
-  const baseTimeParams = [range.start, range.end, ...iP, ...tfP, ...dP];
+  const baseTimeWhere = `e.timestamp >= ? AND e.timestamp < ?${dash.clause}`;
+  const baseTimeParams = [range.start, range.end, ...dash.params];
 
   // Predicates we'll reuse. Stringified placeholders are inlined into
   // the SQL; values are passed as bind params.
@@ -1991,12 +2136,12 @@ export function getCategoryBreakdown(
   opts: { timeFilters?: TimeFilters; device?: string } = {}
 ): CategoryBreakdownResult {
   const range = parsePeriod(period);
-  const ignored = getIgnoredApps(db);
-  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
-  const { clause: tC, params: tP } = buildTimeFilters(opts.timeFilters);
-  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device);
-  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${iC}${tC}${dC}`;
-  const baseParams = [range.start, range.end, ...iP, ...tP, ...dP];
+  const dash = dashboardEntryClauseAndParams(db, "e", {
+    timeFilters: opts.timeFilters,
+    device: opts.device,
+  });
+  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${dash.clause}`;
+  const baseParams = [range.start, range.end, ...dash.params];
   const active = activeFilter(db);
   const passive = passiveFilter(db);
   const displayNames = loadDisplayNames(db);
@@ -2158,10 +2303,12 @@ export function getListeningHistory(
       ? [...browserApps, ...musicBrowserProjects] : []),
   ];
 
-  const { clause: tC, params: tP } = buildTimeFilters(opts.timeFilters);
-  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device);
-  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${tC}${dC}`;
-  const baseParams = [range.start, range.end, ...tP, ...dP];
+  const dash = dashboardEntryClauseAndParams(db, "e", {
+    timeFilters: opts.timeFilters,
+    device: opts.device,
+  });
+  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${dash.clause}`;
+  const baseParams = [range.start, range.end, ...dash.params];
   const active = activeFilter(db);
   const passive = passiveFilter(db);
 
@@ -2327,13 +2474,13 @@ export function getFocusHeatmap(
   } = {}
 ): FocusHeatmapResult {
   const range = parsePeriod(period);
-  const ignored = getIgnoredApps(db);
-  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
-  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device);
+  const dash = dashboardEntryClauseAndParams(db, "e", { device: opts.device });
   const where: string[] = ["e.timestamp >= ?", "e.timestamp < ?"];
   const params: (string | number)[] = [range.start, range.end];
-  if (iC) { where.push(iC.replace(/^ AND /, "")); params.push(...iP); }
-  if (dC) { where.push(dC.replace(/^ AND /, "")); params.push(...dP); }
+  if (dash.clause) {
+    where.push(dash.clause.replace(/^ AND /, ""));
+    params.push(...dash.params);
+  }
   if (opts.app) { where.push("e.app_name = ?"); params.push(opts.app); }
   if (opts.project) { where.push("e.project = ?"); params.push(opts.project); }
   // Tag filter requires a JOIN — handled separately so we don't pay for it

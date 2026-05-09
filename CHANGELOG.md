@@ -2,6 +2,18 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.0.1 — 2026-05-09
+
+### Fixed
+
+- **Period totals now honor every dashboard exclusion, not just `ignored_apps`.** The desktop app filters report totals by `ignored_apps` *and* `ignored_projects` (explicit `(app, project)` pairs) *and* `ignored_breakdown_patterns` (substring / extension patterns per app, e.g. Cursor `.tsx` files) *and* the `days_filter` setting (`weekdays` / `weekends` / `all`). The MCP was only honoring `ignored_apps`, so totals diverged from Charts / Dashboard for users with the other filters configured. All period-aware tools — `get_report`, `get_app_breakdown`, `get_app_stats`, `get_tag_breakdown`, `get_calendar`, `get_device_breakdown`, `get_sessions`, `get_music_split`, `get_category_breakdown`, `get_listening_history`, `get_focus_heatmap`, `get_goals_progress`, and `query_entries` (when `period` is set) — now apply the full filter stack via a shared `dashboardEntryClauseAndParams` helper so totals stay consistent across tools and with the dashboard.
+- `query_entries` description updated to document the period-vs-no-period scope distinction: with a period, dashboard exclusions apply; without one, the call bypasses them and only the explicit filter args (app / project / tag / search / device / hour / weekdays / mode) narrow the result.
+- `get_report` description updated to enumerate the filters it now applies.
+
+### Notes
+
+- This is a behavioral fix, not an API change. Tool names, parameter names, and response field names are unchanged. Users without `ignored_projects` / `ignored_breakdown_patterns` / a non-`all` `days_filter` configured will see identical totals.
+
 ## 1.0.0 — 2026-05-09
 
 First stable release. The 18-tool surface, parameter names, and response shapes documented in the README are now part of the SemVer contract — see the **Stability guarantees** section there for what changes are minor vs major.
