@@ -38,15 +38,18 @@ server.registerTool(
   {
     title: "Get time report",
     description:
-      "Aggregate Vetroscope time report for a period: total active seconds, top apps, and top projects. Mirrors the desktop dashboard.",
+      "Aggregate Vetroscope time report for a period: total active seconds, top apps, and top projects (with sub-projects nested when present — e.g. individual YouTube videos, SoundCloud songs, Netflix episodes). Apps include the user's custom display_name when set. Mirrors the desktop dashboard.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).default("today"),
       top_apps: z.number().int().min(1).max(500).optional().describe("Max apps returned (default 50)"),
       top_projects: z.number().int().min(1).max(500).optional().describe("Max projects returned (default 50)"),
+      top_sub_projects: z.number().int().min(0).max(200).optional().describe("Max sub-projects per project (default 25, 0 to omit)"),
     },
   },
-  async ({ period, top_apps, top_projects }) =>
-    asJson(getReport(db(), period, { topApps: top_apps, topProjects: top_projects }))
+  async ({ period, top_apps, top_projects, top_sub_projects }) =>
+    asJson(getReport(db(), period, {
+      topApps: top_apps, topProjects: top_projects, topSubProjects: top_sub_projects,
+    }))
 );
 
 server.registerTool(
@@ -54,14 +57,16 @@ server.registerTool(
   {
     title: "Get per-app breakdown",
     description:
-      "Per-project breakdown for a single app over a period. Use this when the user asks 'what was I working on in After Effects this week?'",
+      "Per-project breakdown for a single app over a period, with sub-projects nested when present (e.g. individual YouTube videos under the YouTube project). Use this when the user asks 'what was I working on in After Effects this week?' or 'which YouTube videos did I watch today?'",
     inputSchema: {
-      app: z.string().describe("Exact app name as recorded by Vetroscope (e.g. 'After Effects', 'Cursor')."),
+      app: z.string().describe("Exact app name as recorded by Vetroscope (e.g. 'After Effects', 'Cursor'). Match the canonical name, not the user's custom display_name."),
       period: z.string().describe(PERIOD_DESCRIPTION).default("today"),
       limit: z.number().int().min(1).max(500).optional().describe("Max projects returned (default 100)"),
+      top_sub_projects: z.number().int().min(0).max(200).optional().describe("Max sub-projects per project (default 25, 0 to omit)"),
     },
   },
-  async ({ app, period, limit }) => asJson(getAppBreakdown(db(), app, period, limit))
+  async ({ app, period, limit, top_sub_projects }) =>
+    asJson(getAppBreakdown(db(), app, period, limit, top_sub_projects))
 );
 
 server.registerTool(
