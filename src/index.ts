@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -13,9 +16,42 @@ import {
 const PERIOD_DESCRIPTION =
   "today | yesterday | week | month | year | YYYY-MM-DD | YYYY-MM-DD..YYYY-MM-DD";
 
+/**
+ * Bundle the Vetroscope app icon as data URIs in serverInfo.icons so MCP
+ * clients (Claude Desktop, Cursor, etc.) can show the logo next to the
+ * connector. Embedded rather than URL-referenced so the MCP stays fully
+ * offline — no network fetch on init.
+ */
+function loadIcon(filename: string, sizes: string[]): {
+  src: string;
+  mimeType: "image/png";
+  sizes: string[];
+} {
+  // Assets ship as a sibling of dist/ in the npm package; we resolve from
+  // this file's URL so it works in both `node dist/index.js` and the
+  // `npx vetroscope-mcp` install layouts.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const buf = readFileSync(join(here, "..", "assets", filename));
+  return {
+    src: `data:image/png;base64,${buf.toString("base64")}`,
+    mimeType: "image/png",
+    sizes,
+  };
+}
+
+const SERVER_ICONS = [
+  loadIcon("icon-128.png", ["128x128"]),
+  loadIcon("icon-256.png", ["256x256"]),
+];
+
 const server = new McpServer({
   name: "vetroscope-mcp",
-  version: "0.1.0",
+  version: "0.1.1",
+  title: "Vetroscope",
+  description:
+    "Read-only access to your local Vetroscope time-tracking database — apps, projects, goals, and individual sessions.",
+  websiteUrl: "https://rankin.works",
+  icons: SERVER_ICONS,
 });
 
 // Open DB lazily on first tool call so the server still starts cleanly when
