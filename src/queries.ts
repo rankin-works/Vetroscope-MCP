@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { parsePeriod, type Range } from "./periods.js";
+import { categorizeApp, CATEGORY_LABELS, type AppCategory } from "./categories.js";
 
 /**
  * Vetroscope polls every 30s. The dashboard computes durations as the count
@@ -1956,4 +1957,418 @@ export function getMusicSplit(
     bySource,
     classifier: { musicApps, musicBrowserProjects, browserApps },
   };
+}
+
+// ── get_category_breakdown ────────────────────────────────────────────────
+
+export interface CategoryTotal {
+  category: AppCategory;
+  /** Human label suitable for display ("Code Editors / IDEs"). */
+  label: string;
+  /** Active foreground seconds across all apps in this category. */
+  totalSeconds: number;
+  /** Background away-listening seconds (mostly relevant for `media`). */
+  passiveSeconds: number;
+  /** Apps in this category that contributed time, sorted by seconds desc. */
+  apps: AppTotal[];
+}
+
+export interface CategoryBreakdownResult extends Range {
+  totalSeconds: number;
+  totalPassiveSeconds: number;
+  categories: CategoryTotal[];
+}
+
+/**
+ * Rolls up app totals into Vetroscope's broader categories: editors, browsers,
+ * Adobe creative cloud, communication, gaming, etc. Apps not in the canonical
+ * map land in `uncategorized` so the LLM can see what's missing classification.
+ * Same time / device filters as get_report.
+ */
+export function getCategoryBreakdown(
+  db: Database.Database,
+  period: string,
+  opts: { timeFilters?: TimeFilters; device?: string } = {}
+): CategoryBreakdownResult {
+  const range = parsePeriod(period);
+  const ignored = getIgnoredApps(db);
+  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
+  const { clause: tC, params: tP } = buildTimeFilters(opts.timeFilters);
+  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device);
+  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${iC}${tC}${dC}`;
+  const baseParams = [range.start, range.end, ...iP, ...tP, ...dP];
+  const active = activeFilter(db);
+  const passive = passiveFilter(db);
+  const displayNames = loadDisplayNames(db);
+
+  const activeApps = db
+    .prepare(
+      `SELECT e.app_name AS app, ${SECONDS_EXPR} AS seconds
+         FROM entries e WHERE ${baseWhere}${active}
+        GROUP BY e.app_name`
+    )
+    .all(...baseParams) as Array<{ app: string; seconds: number }>;
+  const passiveApps = db
+    .prepare(
+      `SELECT e.app_name AS app, ${SECONDS_EXPR} AS seconds
+         FROM entries e WHERE ${baseWhere}${passive}
+        GROUP BY e.app_name`
+    )
+    .all(...baseParams) as Array<{ app: string; seconds: number }>;
+
+  const appMap = new Map<string, AppTotal>();
+  for (const r of activeApps) {
+    appMap.set(r.app, {
+      app: r.app, displayName: displayNames.get(r.app) ?? null,
+      seconds: r.seconds, passiveSeconds: 0,
+    });
+  }
+  for (const r of passiveApps) {
+    const existing = appMap.get(r.app);
+    if (existing) existing.passiveSeconds = r.seconds;
+    else appMap.set(r.app, {
+      app: r.app, displayName: displayNames.get(r.app) ?? null,
+      seconds: 0, passiveSeconds: r.seconds,
+    });
+  }
+
+  const catMap = new Map<AppCategory, CategoryTotal>();
+  for (const app of appMap.values()) {
+    const cat = categorizeApp(app.app);
+    let bucket = catMap.get(cat);
+    if (!bucket) {
+      bucket = {
+        category: cat,
+        label: CATEGORY_LABELS[cat],
+        totalSeconds: 0,
+        passiveSeconds: 0,
+        apps: [],
+      };
+      catMap.set(cat, bucket);
+    }
+    bucket.totalSeconds += app.seconds;
+    bucket.passiveSeconds += app.passiveSeconds;
+    bucket.apps.push(app);
+  }
+  const categories = [...catMap.values()];
+  for (const c of categories) {
+    c.apps.sort((a, b) => (b.seconds + b.passiveSeconds) - (a.seconds + a.passiveSeconds));
+  }
+  categories.sort((a, b) => (b.totalSeconds + b.passiveSeconds) - (a.totalSeconds + a.passiveSeconds));
+
+  let total = 0;
+  let totalPassive = 0;
+  for (const c of categories) {
+    total += c.totalSeconds;
+    totalPassive += c.passiveSeconds;
+  }
+
+  return {
+    ...range,
+    totalSeconds: total,
+    totalPassiveSeconds: totalPassive,
+    categories,
+  };
+}
+
+// ── get_listening_history ─────────────────────────────────────────────────
+
+export interface ListeningTrack {
+  /** Format depends on source — Spotify/Apple Music encode "Artist — Title" in sub_project. */
+  trackTitle: string;
+  /** Best-effort artist parsed from sub_project (text before " — "). Null if unparseable. */
+  artist: string | null;
+  /** App or browser project that played this track ("Spotify", "SoundCloud"). */
+  source: string;
+  totalSeconds: number;
+  passiveSeconds: number;
+  firstHeard: string;
+  lastHeard: string;
+}
+
+export interface ListeningArtistTotal {
+  artist: string;
+  totalSeconds: number;
+  trackCount: number;
+}
+
+export interface ListeningHistoryResult extends Range {
+  totalSeconds: number;
+  totalPassiveSeconds: number;
+  uniqueTracks: number;
+  uniqueArtists: number;
+  /** Top tracks across all music sources, sorted by totalSeconds desc. */
+  topTracks: ListeningTrack[];
+  /** Top artists derived from track titles, sorted by totalSeconds desc. */
+  topArtists: ListeningArtistTotal[];
+  /** Per-day listening minutes. */
+  daily: Array<{ date: string; seconds: number }>;
+}
+
+/**
+ * Aggregates sub_project rows from music sources into top tracks + top
+ * artists. Music is identified the same way as get_music_split (native
+ * music apps + browser music projects, both override-able).
+ */
+export function getListeningHistory(
+  db: Database.Database,
+  period: string,
+  opts: {
+    musicApps?: string[];
+    musicBrowserProjects?: string[];
+    browserApps?: string[];
+    topTracks?: number;
+    topArtists?: number;
+    timeFilters?: TimeFilters;
+    device?: string;
+  } = {}
+): ListeningHistoryResult {
+  const range = parsePeriod(period);
+  if (!hasSubProjectColumn(db)) {
+    // sub_project carries the track title; without it there's no listening
+    // detail to surface (just app-level totals which the music-split tool
+    // already covers).
+    return {
+      ...range, totalSeconds: 0, totalPassiveSeconds: 0,
+      uniqueTracks: 0, uniqueArtists: 0,
+      topTracks: [], topArtists: [], daily: [],
+    };
+  }
+  const musicApps = opts.musicApps ?? DEFAULT_MUSIC_APPS;
+  const musicBrowserProjects = opts.musicBrowserProjects ?? DEFAULT_MUSIC_BROWSER_PROJECTS;
+  const browserApps = opts.browserApps ?? [
+    "Google Chrome", "Chromium", "Safari", "Firefox", "Arc",
+    "Microsoft Edge", "Brave Browser", "Vivaldi", "Opera", "Zen Browser",
+  ];
+
+  const musicAppPlaceholders = musicApps.map(() => "?").join(",");
+  const browserAppPlaceholders = browserApps.map(() => "?").join(",");
+  const musicProjPlaceholders = musicBrowserProjects.map(() => "?").join(",");
+  const isMusicEntrySql = musicApps.length === 0 && musicBrowserProjects.length === 0
+    ? "0 = 1"
+    : [
+        musicApps.length > 0 ? `e.app_name IN (${musicAppPlaceholders})` : null,
+        musicBrowserProjects.length > 0 && browserApps.length > 0
+          ? `(e.app_name IN (${browserAppPlaceholders}) AND e.project IN (${musicProjPlaceholders}))`
+          : null,
+      ].filter(Boolean).join(" OR ");
+  const musicPredicateParams = [
+    ...musicApps,
+    ...(musicBrowserProjects.length > 0 && browserApps.length > 0
+      ? [...browserApps, ...musicBrowserProjects] : []),
+  ];
+
+  const { clause: tC, params: tP } = buildTimeFilters(opts.timeFilters);
+  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device);
+  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${tC}${dC}`;
+  const baseParams = [range.start, range.end, ...tP, ...dP];
+  const active = activeFilter(db);
+  const passive = passiveFilter(db);
+
+  // Source label — native music apps keep their app_name, browser music
+  // collapses to the project ("SoundCloud") so the same SoundCloud row
+  // doesn't split across browsers.
+  const sourceLabel = musicApps.length > 0
+    ? `CASE WHEN e.app_name IN (${musicAppPlaceholders}) THEN e.app_name ELSE e.project END`
+    : `e.project`;
+
+  // Bind order matches placeholder order in the SQL string:
+  // (1) SELECT CASE musicApps, (2) WHERE base (timestamp + time/device filters),
+  // (3) WHERE musicPredicateParams.
+  const trackParams = [...musicApps, ...baseParams, ...musicPredicateParams];
+  const tracksActive = db
+    .prepare(
+      `SELECT e.sub_project AS trackTitle, ${sourceLabel} AS source,
+              ${SECONDS_EXPR} AS seconds,
+              MIN(e.timestamp) AS firstHeard,
+              MAX(e.timestamp) AS lastHeard
+         FROM entries e
+        WHERE ${baseWhere} AND e.sub_project IS NOT NULL AND e.sub_project != ''
+          AND (${isMusicEntrySql})${active}
+        GROUP BY e.sub_project, source`
+    )
+    .all(...trackParams) as Array<{
+    trackTitle: string; source: string; seconds: number; firstHeard: string; lastHeard: string;
+  }>;
+  const tracksPassive = db
+    .prepare(
+      `SELECT e.sub_project AS trackTitle, ${sourceLabel} AS source,
+              ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${baseWhere} AND e.sub_project IS NOT NULL AND e.sub_project != ''
+          AND (${isMusicEntrySql})${passive}
+        GROUP BY e.sub_project, source`
+    )
+    .all(...trackParams) as Array<{
+    trackTitle: string; source: string; seconds: number;
+  }>;
+
+  const trackMap = new Map<string, ListeningTrack>();
+  const tkey = (t: string, s: string) => `${t}\0${s}`;
+  for (const r of tracksActive) {
+    // sub_project from Spotify/Apple Music conventionally uses an em-dash
+    // separator: "Artist — Title". We fall back to splitting on " - " or
+    // " by " for sources that use those instead. Anything we can't parse
+    // gets a null artist and surfaces as-is.
+    const artist = parseArtist(r.trackTitle);
+    trackMap.set(tkey(r.trackTitle, r.source), {
+      trackTitle: r.trackTitle,
+      artist,
+      source: r.source,
+      totalSeconds: r.seconds,
+      passiveSeconds: 0,
+      firstHeard: r.firstHeard,
+      lastHeard: r.lastHeard,
+    });
+  }
+  for (const r of tracksPassive) {
+    const k = tkey(r.trackTitle, r.source);
+    const existing = trackMap.get(k);
+    if (existing) existing.passiveSeconds = r.seconds;
+    else {
+      const artist = parseArtist(r.trackTitle);
+      trackMap.set(k, {
+        trackTitle: r.trackTitle, artist, source: r.source,
+        totalSeconds: 0, passiveSeconds: r.seconds,
+        firstHeard: "", lastHeard: "",
+      });
+    }
+  }
+  const allTracks = [...trackMap.values()].sort((a, b) =>
+    (b.totalSeconds + b.passiveSeconds) - (a.totalSeconds + a.passiveSeconds));
+
+  // Artist rollup over the same data.
+  const artistMap = new Map<string, ListeningArtistTotal>();
+  for (const t of allTracks) {
+    if (!t.artist) continue;
+    let a = artistMap.get(t.artist);
+    if (!a) { a = { artist: t.artist, totalSeconds: 0, trackCount: 0 }; artistMap.set(t.artist, a); }
+    a.totalSeconds += t.totalSeconds + t.passiveSeconds;
+    a.trackCount += 1;
+  }
+  const artists = [...artistMap.values()].sort((a, b) => b.totalSeconds - a.totalSeconds);
+
+  const totalSeconds = allTracks.reduce((acc, t) => acc + t.totalSeconds, 0);
+  const totalPassiveSeconds = allTracks.reduce((acc, t) => acc + t.passiveSeconds, 0);
+
+  // Daily series — total music time per day (active + passive combined,
+  // since daily listening minutes feel more natural as a single number).
+  const dailyRows = db
+    .prepare(
+      `SELECT DATE(e.timestamp, 'localtime') AS date, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${baseWhere} AND (${isMusicEntrySql})
+        GROUP BY DATE(e.timestamp, 'localtime')
+        ORDER BY date`
+    )
+    .all(...baseParams, ...musicPredicateParams) as Array<{ date: string; seconds: number }>;
+
+  return {
+    ...range,
+    totalSeconds, totalPassiveSeconds,
+    uniqueTracks: allTracks.length,
+    uniqueArtists: artists.length,
+    topTracks: allTracks.slice(0, opts.topTracks ?? 50),
+    topArtists: artists.slice(0, opts.topArtists ?? 25),
+    daily: dailyRows,
+  };
+}
+
+function parseArtist(trackTitle: string): string | null {
+  // Em-dash separator (Spotify / Apple Music / SoundCloud convention).
+  const em = trackTitle.split(" — ");
+  if (em.length >= 2 && em[0].trim().length > 0) return em[0].trim();
+  // Plain ASCII " - " fallback.
+  const dash = trackTitle.split(" - ");
+  if (dash.length >= 2 && dash[0].trim().length > 0) return dash[0].trim();
+  // " by " fallback (less common, e.g. Bandcamp pages).
+  const by = trackTitle.split(/\s+by\s+/i);
+  if (by.length >= 2 && by[1].trim().length > 0) return by[1].trim();
+  return null;
+}
+
+// ── get_focus_heatmap ─────────────────────────────────────────────────────
+
+export interface HeatmapCell {
+  /** 0=Sunday, 1=Monday, …, 6=Saturday. */
+  weekday: number;
+  /** 0–23 in local time. */
+  hour: number;
+  seconds: number;
+}
+
+export interface FocusHeatmapResult extends Range {
+  /**
+   * Dense 7×24 = 168 cells. Always returned in (weekday, hour) order so the
+   * LLM can index directly: cells[weekday * 24 + hour].
+   */
+  cells: HeatmapCell[];
+  /** Maximum seconds in any single cell — useful for normalizing displays. */
+  maxCellSeconds: number;
+  /** Sum across all cells (matches the period's active total under the same filters). */
+  totalSeconds: number;
+}
+
+/**
+ * Joint hour-of-day × weekday distribution. Reveals "I code on Mondays
+ * 9–11am" or "I game Sundays 8pm" patterns the marginal hour and weekday
+ * histograms in get_app_stats can't show. Optional app / project / tag
+ * filters narrow it to a single activity. Active foreground time only —
+ * passive music doesn't smear the productivity peaks.
+ */
+export function getFocusHeatmap(
+  db: Database.Database,
+  period: string,
+  opts: {
+    app?: string;
+    project?: string;
+    tag?: string;
+    device?: string;
+  } = {}
+): FocusHeatmapResult {
+  const range = parsePeriod(period);
+  const ignored = getIgnoredApps(db);
+  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
+  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device);
+  const where: string[] = ["e.timestamp >= ?", "e.timestamp < ?"];
+  const params: (string | number)[] = [range.start, range.end];
+  if (iC) { where.push(iC.replace(/^ AND /, "")); params.push(...iP); }
+  if (dC) { where.push(dC.replace(/^ AND /, "")); params.push(...dP); }
+  if (opts.app) { where.push("e.app_name = ?"); params.push(opts.app); }
+  if (opts.project) { where.push("e.project = ?"); params.push(opts.project); }
+  // Tag filter requires a JOIN — handled separately so we don't pay for it
+  // when the caller doesn't ask for it.
+  const joinTags = opts.tag ? "INNER JOIN tags t ON t.id = e.tag_id" : "";
+  if (opts.tag) { where.push("t.name = ?"); params.push(opts.tag); }
+
+  const active = activeFilter(db);
+  const rows = db
+    .prepare(
+      `SELECT CAST(strftime('%w', e.timestamp, 'localtime') AS INTEGER) AS weekday,
+              CAST(strftime('%H', e.timestamp, 'localtime') AS INTEGER) AS hour,
+              ${SECONDS_EXPR} AS seconds
+         FROM entries e
+         ${joinTags}
+        WHERE ${where.join(" AND ")}${active}
+        GROUP BY weekday, hour`
+    )
+    .all(...params) as Array<{ weekday: number; hour: number; seconds: number }>;
+
+  // Densify to 168 cells in (weekday, hour) order so cells[w*24 + h] indexes
+  // directly. Missing combinations get 0 seconds rather than being absent.
+  const cellMap = new Map<number, number>();
+  for (const r of rows) cellMap.set(r.weekday * 24 + r.hour, r.seconds);
+  const cells: HeatmapCell[] = [];
+  let max = 0;
+  let total = 0;
+  for (let w = 0; w < 7; w++) {
+    for (let h = 0; h < 24; h++) {
+      const seconds = cellMap.get(w * 24 + h) ?? 0;
+      cells.push({ weekday: w, hour: h, seconds });
+      if (seconds > max) max = seconds;
+      total += seconds;
+    }
+  }
+
+  return { ...range, cells, maxCellSeconds: max, totalSeconds: total };
 }

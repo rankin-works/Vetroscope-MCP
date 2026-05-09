@@ -17,6 +17,9 @@ Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip,
 | `get_calendar` | Dense per-day series (heatmap data) for any period — defaults to a full year. |
 | `get_device_breakdown` | Per-device totals when you run Vetroscope across multiple machines. |
 | `get_music_split` | Music-vs-work analysis: work-with-music / music-only / heads-down-work / other, plus per-source (Spotify, SoundCloud, …) overlap totals. Classifier is overridable per call. |
+| `get_category_breakdown` | Time rolled up into broad categories: editor, browser, adobe, communication, gaming, productivity, creative, etc. Mirrors Vetroscope's internal app grouping. |
+| `get_listening_history` | Top tracks and top artists across native music apps and browser music sites, plus per-day listening minutes. Artists parsed from the "Artist — Title" sub_project convention. |
+| `get_focus_heatmap` | 7×24 grid of active foreground seconds — when do you usually do specific kinds of work. Optional app / project / tag filter to narrow to a single activity. |
 
 **Reference / lookup**
 
@@ -146,6 +149,9 @@ You can override either piece with environment variables:
 - *"How much of my coding time was on my Mac vs Windows this month?"*
 - *"How much of my work this week had music playing?"*
 - *"How long did I spend just listening to music with nothing else open today?"*
+- *"How much creative work vs coding did I do this month?"*
+- *"Who were my top five artists this week?"*
+- *"When during the week do I usually code in Cursor?"*
 
 ## Local development
 

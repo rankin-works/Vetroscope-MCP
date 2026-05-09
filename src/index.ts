@@ -22,6 +22,9 @@ import {
   getCalendar,
   getDeviceBreakdown,
   getMusicSplit,
+  getCategoryBreakdown,
+  getListeningHistory,
+  getFocusHeatmap,
   DEFAULT_MUSIC_APPS,
   DEFAULT_MUSIC_BROWSER_PROJECTS,
   type TimeFilters,
@@ -76,7 +79,7 @@ const SERVER_ICONS = [
 
 const server = new McpServer({
   name: "vetroscope-mcp",
-  version: "0.5.0",
+  version: "0.6.0",
   title: "Vetroscope",
   description:
     "Read-only access to your local Vetroscope time-tracking database — apps, projects, goals, and individual sessions.",
@@ -395,6 +398,78 @@ server.registerTool(
       musicBrowserProjects: args.music_browser_projects,
       timeFilters: pickTimeFilters(args),
       device: args.device,
+    }))
+);
+
+server.registerTool(
+  "get_category_breakdown",
+  {
+    title: "Get time by app category",
+    description:
+      "Rolls up app totals into broad categories (editor, browser, adobe, communication, gaming, productivity, creative, music_creation, etc.) so you can ask 'how much creative work vs coding?' without naming every app. Categories mirror Vetroscope's internal app grouping. Apps not in the canonical map land in 'uncategorized' — useful for spotting missing classifications.",
+    inputSchema: {
+      period: z.string().describe(PERIOD_DESCRIPTION).default("week"),
+      hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
+      hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
+      weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
+      device: z.string().optional().describe(DEVICE_DESC),
+    },
+  },
+  async (args) =>
+    asJson(getCategoryBreakdown(db(), args.period, {
+      timeFilters: pickTimeFilters(args),
+      device: args.device,
+    }))
+);
+
+server.registerTool(
+  "get_listening_history",
+  {
+    title: "Get listening history",
+    description:
+      "Top tracks and top artists across native music apps and browser music sites for the period, plus per-day listening minutes. Tracks come from entries.sub_project (e.g. 'Fox Stevenson — Tryhard'); artists are parsed from the 'Artist — Title' convention. Same music classifier as get_music_split — override via music_apps / music_browser_projects to e.g. include YouTube as music for this query.",
+    inputSchema: {
+      period: z.string().describe(PERIOD_DESCRIPTION).default("week"),
+      top_tracks: z.number().int().min(1).max(500).optional().describe("Max tracks returned (default 50)"),
+      top_artists: z.number().int().min(1).max(200).optional().describe("Max artists returned (default 25)"),
+      music_apps: z.array(z.string()).optional()
+        .describe(`Override the native music app list. Default: ${JSON.stringify(DEFAULT_MUSIC_APPS)}`),
+      music_browser_projects: z.array(z.string()).optional()
+        .describe(`Override the browser-music project list. Default: ${JSON.stringify(DEFAULT_MUSIC_BROWSER_PROJECTS)}`),
+      hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
+      hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
+      weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
+      device: z.string().optional().describe(DEVICE_DESC),
+    },
+  },
+  async (args) =>
+    asJson(getListeningHistory(db(), args.period, {
+      topTracks: args.top_tracks,
+      topArtists: args.top_artists,
+      musicApps: args.music_apps,
+      musicBrowserProjects: args.music_browser_projects,
+      timeFilters: pickTimeFilters(args),
+      device: args.device,
+    }))
+);
+
+server.registerTool(
+  "get_focus_heatmap",
+  {
+    title: "Get focus heatmap (hour × weekday grid)",
+    description:
+      "Returns a dense 168-cell grid (7 weekdays × 24 hours) of active foreground seconds. Reveals when you usually do specific kinds of work — patterns the marginal hour-of-day and weekday distributions can't show. Optional app / project / tag filters narrow the heatmap to a single activity (e.g. 'when do I usually code in Cursor?'). Cells array is in (weekday, hour) order so cells[w*24 + h] indexes directly. 0=Sunday in weekday.",
+    inputSchema: {
+      period: z.string().describe(PERIOD_DESCRIPTION).default("month"),
+      app: z.string().optional().describe("Restrict to a single app (canonical name)"),
+      project: z.string().optional().describe("Restrict to a single project (exact match)"),
+      tag: z.string().optional().describe("Restrict to entries carrying a tag with this exact name"),
+      device: z.string().optional().describe(DEVICE_DESC),
+    },
+  },
+  async (args) =>
+    asJson(getFocusHeatmap(db(), args.period, {
+      app: args.app, project: args.project, tag: args.tag, device: args.device,
     }))
 );
 
