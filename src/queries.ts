@@ -1732,3 +1732,228 @@ export function getDeviceBreakdown(
   const totalSeconds = devices.reduce((acc, d) => acc + d.totalSeconds, 0);
   return { ...range, totalSeconds, devices };
 }
+
+// ── get_music_split ──────────────────────────────────────────────────────
+
+/**
+ * Default classification, mirrored from Vetroscope's renderer (see
+ * `src/components/ProjectRow.tsx` MUSIC_APPS) plus the obvious browser-tab
+ * music sites. Both are overridable per-call so the LLM can include
+ * YouTube as music, exclude Apple Music, etc., for a specific question.
+ */
+export const DEFAULT_MUSIC_APPS = ["Spotify", "Apple Music", "Music"];
+export const DEFAULT_MUSIC_BROWSER_PROJECTS = [
+  "SoundCloud",
+  "YouTube Music",
+  "Spotify",
+  "Apple Music",
+  "Bandcamp",
+  "Tidal",
+  "Pandora",
+];
+const DEFAULT_BROWSER_APPS = [
+  "Google Chrome", "Chromium", "Safari", "Firefox", "Arc",
+  "Microsoft Edge", "Brave Browser", "Vivaldi", "Opera", "Zen Browser",
+];
+
+export interface MusicSourceTotal {
+  /** Either an app name (Spotify) or a browser-music project name (SoundCloud). */
+  source: string;
+  /** "native" for native music apps, "browser" for music-site projects under a browser. */
+  kind: "native" | "browser";
+  /** Total seconds the source logged anything (active or passive). */
+  totalSeconds: number;
+  /** Subset of totalSeconds where a non-music app was simultaneously foreground. */
+  whileWorkingSeconds: number;
+  /** Subset where no work-foreground app shared the bucket. */
+  whileNotWorkingSeconds: number;
+}
+
+export interface MusicSplitResult extends Range {
+  /** Total tracked seconds in the period (any entry). */
+  totalTrackedSeconds: number;
+  /** Buckets where music was logging AND a non-music app was foreground. */
+  workWithMusicSeconds: number;
+  /** Buckets with music but no work foreground — pure listening time. */
+  musicOnlySeconds: number;
+  /** Buckets with foreground non-music work AND no music logging. */
+  workWithoutMusicSeconds: number;
+  /**
+   * Buckets that are tracked but fit none of the above three — typically
+   * passive browser entries that aren't classified as music (e.g. a paused
+   * YouTube tab while the user was idle). Add 'YouTube' to
+   * music_browser_projects to fold most of this into musicOnly /
+   * workWithMusic. The four bucket fields are guaranteed to sum to
+   * totalTrackedSeconds.
+   */
+  otherSeconds: number;
+  /** Per-source breakdown of music time, sorted by total desc. */
+  bySource: MusicSourceTotal[];
+  /** The classifier that was used for this call (lets the LLM verify). */
+  classifier: {
+    musicApps: string[];
+    musicBrowserProjects: string[];
+    browserApps: string[];
+  };
+}
+
+export function getMusicSplit(
+  db: Database.Database,
+  period: string,
+  opts: {
+    musicApps?: string[];
+    musicBrowserProjects?: string[];
+    browserApps?: string[];
+    timeFilters?: TimeFilters;
+    device?: string;
+  } = {}
+): MusicSplitResult {
+  const range = parsePeriod(period);
+  const ignored = getIgnoredApps(db);
+  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
+  const { clause: tfC, params: tfP } = buildTimeFilters(opts.timeFilters);
+  const { clause: dC, params: dP } = resolveDeviceFilter(db, opts.device);
+
+  const musicApps = opts.musicApps ?? DEFAULT_MUSIC_APPS;
+  const musicBrowserProjects = opts.musicBrowserProjects ?? DEFAULT_MUSIC_BROWSER_PROJECTS;
+  const browserApps = opts.browserApps ?? DEFAULT_BROWSER_APPS;
+
+  const baseTimeWhere = `e.timestamp >= ? AND e.timestamp < ?${iC}${tfC}${dC}`;
+  const baseTimeParams = [range.start, range.end, ...iP, ...tfP, ...dP];
+
+  // Predicates we'll reuse. Stringified placeholders are inlined into
+  // the SQL; values are passed as bind params.
+  const musicAppPlaceholders = musicApps.map(() => "?").join(",");
+  const browserAppPlaceholders = browserApps.map(() => "?").join(",");
+  const musicProjPlaceholders = musicBrowserProjects.map(() => "?").join(",");
+
+  const isMusicEntrySql = musicApps.length === 0 && musicBrowserProjects.length === 0
+    ? "0 = 1"
+    : [
+        musicApps.length > 0
+          ? `e.app_name IN (${musicAppPlaceholders})`
+          : null,
+        musicBrowserProjects.length > 0 && browserApps.length > 0
+          ? `(e.app_name IN (${browserAppPlaceholders}) AND e.project IN (${musicProjPlaceholders}))`
+          : null,
+      ].filter(Boolean).join(" OR ");
+  const musicPredicateParams = [
+    ...musicApps,
+    ...(musicBrowserProjects.length > 0 && browserApps.length > 0
+      ? [...browserApps, ...musicBrowserProjects] : []),
+  ];
+
+  const isWorkEntrySql = `e.is_passive = 0 AND NOT (${isMusicEntrySql})`;
+  const bucket = BUCKET_EXPR;
+
+  // Three bucket sets — distinct 30s windows where each predicate held.
+  // INTERSECT/EXCEPT are SQLite-native set operators so the overlap math
+  // happens at the SQL layer in one round trip.
+  const sql = `
+    WITH music_buckets AS (
+      SELECT DISTINCT ${bucket} AS b FROM entries e
+       WHERE ${baseTimeWhere} AND (${isMusicEntrySql})
+    ),
+    work_buckets AS (
+      SELECT DISTINCT ${bucket} AS b FROM entries e
+       WHERE ${baseTimeWhere} AND ${isWorkEntrySql}
+    ),
+    all_buckets AS (
+      SELECT DISTINCT ${bucket} AS b FROM entries e
+       WHERE ${baseTimeWhere}
+    )
+    SELECT
+      (SELECT COUNT(*) FROM (SELECT b FROM music_buckets INTERSECT SELECT b FROM work_buckets)) AS workWithMusic,
+      (SELECT COUNT(*) FROM (SELECT b FROM music_buckets EXCEPT    SELECT b FROM work_buckets)) AS musicOnly,
+      (SELECT COUNT(*) FROM (SELECT b FROM work_buckets  EXCEPT    SELECT b FROM music_buckets)) AS workOnly,
+      (SELECT COUNT(*) FROM all_buckets) AS totalTracked
+  `;
+  // music CTE bind params, then work CTE (which reuses isMusicEntrySql so
+  // also needs the music params), then all_buckets (no extra), three times
+  // for the WHERE filters and twice more for the music predicate inside.
+  const params = [
+    ...baseTimeParams, ...musicPredicateParams,    // music_buckets
+    ...baseTimeParams, ...musicPredicateParams,    // work_buckets (NOT music)
+    ...baseTimeParams,                              // all_buckets
+  ];
+  const row = db.prepare(sql).get(...params) as {
+    workWithMusic: number;
+    musicOnly: number;
+    workOnly: number;
+    totalTracked: number;
+  };
+
+  // Per-source breakdown — group music-classified entries by their canonical
+  // source label, then count distinct buckets total and distinct buckets
+  // overlapping work_buckets. Two queries keep it readable; both round-trip
+  // in a few ms.
+  const sourceLabel = `CASE
+    WHEN e.app_name IN (${musicAppPlaceholders.length ? musicAppPlaceholders : "''"}) THEN e.app_name
+    ELSE e.project
+  END`;
+  const kindLabel = `CASE
+    WHEN e.app_name IN (${musicAppPlaceholders.length ? musicAppPlaceholders : "''"}) THEN 'native'
+    ELSE 'browser'
+  END`;
+
+  const sourceTotalsRows = musicApps.length === 0 && musicBrowserProjects.length === 0 ? [] : db
+    .prepare(
+      `SELECT ${sourceLabel} AS source, ${kindLabel} AS kind,
+              COUNT(DISTINCT ${bucket}) AS buckets
+         FROM entries e
+        WHERE ${baseTimeWhere} AND (${isMusicEntrySql})
+        GROUP BY source, kind`
+    )
+    .all(
+      ...musicApps,                       // sourceLabel CASE
+      ...musicApps,                       // kindLabel CASE
+      ...baseTimeParams, ...musicPredicateParams,
+    ) as Array<{ source: string; kind: "native" | "browser"; buckets: number }>;
+
+  // Same group, but only buckets that are ALSO in work_buckets.
+  const sourceWorkOverlapRows = musicApps.length === 0 && musicBrowserProjects.length === 0 ? [] : db
+    .prepare(
+      `WITH work_buckets AS (
+         SELECT DISTINCT ${bucket} AS b FROM entries e
+          WHERE ${baseTimeWhere} AND ${isWorkEntrySql}
+       )
+       SELECT ${sourceLabel} AS source, COUNT(DISTINCT ${bucket}) AS buckets
+         FROM entries e
+        WHERE ${baseTimeWhere} AND (${isMusicEntrySql})
+          AND ${bucket} IN (SELECT b FROM work_buckets)
+        GROUP BY source`
+    )
+    .all(
+      ...baseTimeParams, ...musicPredicateParams,   // work_buckets WHERE
+      ...musicApps,                                  // sourceLabel CASE
+      ...baseTimeParams, ...musicPredicateParams,   // outer WHERE
+    ) as Array<{ source: string; buckets: number }>;
+
+  const overlapMap = new Map(sourceWorkOverlapRows.map((r) => [r.source, r.buckets]));
+  const bySource: MusicSourceTotal[] = sourceTotalsRows.map((r) => {
+    const total = r.buckets * POLL_SECONDS;
+    const overlap = (overlapMap.get(r.source) ?? 0) * POLL_SECONDS;
+    return {
+      source: r.source,
+      kind: r.kind,
+      totalSeconds: total,
+      whileWorkingSeconds: overlap,
+      whileNotWorkingSeconds: total - overlap,
+    };
+  });
+  bySource.sort((a, b) => b.totalSeconds - a.totalSeconds);
+
+  return {
+    ...range,
+    totalTrackedSeconds: row.totalTracked * POLL_SECONDS,
+    workWithMusicSeconds: row.workWithMusic * POLL_SECONDS,
+    musicOnlySeconds: row.musicOnly * POLL_SECONDS,
+    workWithoutMusicSeconds: row.workOnly * POLL_SECONDS,
+    // Buckets that aren't in music_buckets ∪ work_buckets — passive browser
+    // entries on non-music projects, mostly. Computed by subtraction so the
+    // four fields exactly sum to totalTrackedSeconds.
+    otherSeconds: (row.totalTracked - row.workWithMusic - row.musicOnly - row.workOnly) * POLL_SECONDS,
+    bySource,
+    classifier: { musicApps, musicBrowserProjects, browserApps },
+  };
+}

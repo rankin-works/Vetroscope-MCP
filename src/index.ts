@@ -21,6 +21,9 @@ import {
   listProjects,
   getCalendar,
   getDeviceBreakdown,
+  getMusicSplit,
+  DEFAULT_MUSIC_APPS,
+  DEFAULT_MUSIC_BROWSER_PROJECTS,
   type TimeFilters,
 } from "./queries.js";
 
@@ -73,7 +76,7 @@ const SERVER_ICONS = [
 
 const server = new McpServer({
   name: "vetroscope-mcp",
-  version: "0.4.1",
+  version: "0.5.0",
   title: "Vetroscope",
   description:
     "Read-only access to your local Vetroscope time-tracking database — apps, projects, goals, and individual sessions.",
@@ -366,6 +369,33 @@ server.registerTool(
     },
   },
   async ({ period }) => asJson(getDeviceBreakdown(db(), period))
+);
+
+server.registerTool(
+  "get_music_split",
+  {
+    title: "Get music vs work split",
+    description:
+      "Splits the period's tracked time into three buckets: 'work with music' (a music app/site was logging while a non-music app was foreground), 'music only' (just listening, no work foreground), and 'work without music' (heads-down silent work). Also returns per-source totals (Spotify, SoundCloud, etc.) with each source's working-vs-not-working overlap. Music classification defaults to native music apps (Spotify, Apple Music) plus common browser music sites (SoundCloud, YouTube Music, Bandcamp, Tidal, Pandora) — override via music_apps / music_browser_projects to e.g. include YouTube as music for a specific question. The same hour-of-day / weekday / device filters as get_report are honored.",
+    inputSchema: {
+      period: z.string().describe(PERIOD_DESCRIPTION).default("week"),
+      music_apps: z.array(z.string()).optional()
+        .describe(`Override the native music app list. Default: ${JSON.stringify(DEFAULT_MUSIC_APPS)}`),
+      music_browser_projects: z.array(z.string()).optional()
+        .describe(`Override the browser-music project list. Default: ${JSON.stringify(DEFAULT_MUSIC_BROWSER_PROJECTS)}. Add 'YouTube' here if you want YouTube counted as music for this query.`),
+      hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
+      hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
+      weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
+      device: z.string().optional().describe(DEVICE_DESC),
+    },
+  },
+  async (args) =>
+    asJson(getMusicSplit(db(), args.period, {
+      musicApps: args.music_apps,
+      musicBrowserProjects: args.music_browser_projects,
+      timeFilters: pickTimeFilters(args),
+      device: args.device,
+    }))
 );
 
 async function main() {

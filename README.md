@@ -16,6 +16,7 @@ Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip,
 | `get_tag_breakdown` | Time-spent report for a single tag — top apps, top projects, daily series, active/passive split. |
 | `get_calendar` | Dense per-day series (heatmap data) for any period — defaults to a full year. |
 | `get_device_breakdown` | Per-device totals when you run Vetroscope across multiple machines. |
+| `get_music_split` | Music-vs-work analysis: work-with-music / music-only / heads-down-work / other, plus per-source (Spotify, SoundCloud, …) overlap totals. Classifier is overridable per call. |
 
 **Reference / lookup**
 
@@ -143,6 +144,8 @@ You can override either piece with environment variables:
 - *"Have I ever worked on a project called 'Atlas'?"*
 - *"What was my busiest day this year?"*
 - *"How much of my coding time was on my Mac vs Windows this month?"*
+- *"How much of my work this week had music playing?"*
+- *"How long did I spend just listening to music with nothing else open today?"*
 
 ## Local development
 
