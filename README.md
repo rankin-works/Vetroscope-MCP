@@ -8,12 +8,23 @@ Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip,
 
 | Tool | What it does |
 |------|--------------|
-| `get_report` | Aggregate report for a period — total active seconds, top apps, top projects. Mirrors the desktop dashboard. |
-| `get_app_breakdown` | Per-project breakdown for a single app over a period. |
-| `get_goals_progress` | Current progress on your configured goals. |
-| `query_entries` | Filtered list of raw tracking entries (app, project, search, period). |
+| `get_report` | Aggregate report for a period — total active seconds, top apps, top projects with sub-projects nested (YouTube videos, SoundCloud songs, Netflix episodes). Mirrors the desktop dashboard. |
+| `get_app_breakdown` | Per-project breakdown for a single app over a period, with sub-projects. |
+| `get_app_stats` | Deep stats for one app: lifetime totals, days active, daily series, hour-of-day distribution, weekday distribution, top projects. |
+| `list_tags` | Quick reference of all your tags (id, name, color, sticky flag). |
+| `get_tag_breakdown` | Time-spent report for a single tag — top apps, top projects, daily series, active/passive split. |
+| `get_goals_progress` | Current progress on your configured app / overall / tag goals. |
+| `query_entries` | Filtered list of raw tracking entries (app, project, tag, search, period). |
 
-All `period` arguments accept: `today`, `yesterday`, `week`, `month`, `year`, `YYYY-MM-DD`, or `YYYY-MM-DD..YYYY-MM-DD`.
+All time-aware tools accept these shared filters:
+
+| Argument | Purpose |
+|----------|---------|
+| `period` | `today` · `yesterday` · `week` · `month` · `year` · single date `YYYY-MM-DD` · inclusive range `YYYY-MM-DD..YYYY-MM-DD` |
+| `hour_start` / `hour_end` | Inclusive / exclusive hour-of-day filter in local time (e.g. `9` and `17` = working hours) |
+| `weekdays` | Array of weekday integers (0=Sun, 1=Mon, …, 6=Sat). Pass `[1,2,3,4,5]` for weekdays only. |
+
+Every total is split into **active** foreground time and **passive** away-listening time (e.g. background music while idle), matching the dashboard's distinction.
 
 ## Requirements
 
@@ -96,6 +107,10 @@ You can override either piece with environment variables:
 - *"Am I on track to hit my coding goal today?"*
 - *"What were the top three projects I touched this month?"*
 - *"Show me every session that touched the 'Vetroscope' project this week."*
+- *"How much time did I spend on the Vetroscope Dev tag this month?"*
+- *"When during the day do I usually use Cursor?"*
+- *"How many hours of focused work did I do during weekday working hours (9–5) last week?"*
+- *"Which YouTube videos did I watch yesterday and how long?"*
 
 ## Local development
 

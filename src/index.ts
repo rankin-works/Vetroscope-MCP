@@ -11,10 +11,29 @@ import {
   getAppBreakdown,
   getGoalsProgress,
   queryEntries,
+  listTags,
+  getTagBreakdown,
+  getAppStats,
+  type TimeFilters,
 } from "./queries.js";
 
 const PERIOD_DESCRIPTION =
-  "today | yesterday | week | month | year | YYYY-MM-DD | YYYY-MM-DD..YYYY-MM-DD";
+  "today | yesterday | week | month | year | a single date YYYY-MM-DD | an inclusive date range YYYY-MM-DD..YYYY-MM-DD";
+
+// Shared zod fragments for the optional hour-of-day / weekday time filter.
+const HOUR_START_DESC = "Inclusive start hour 0-24 in local time. Combine with hour_end (e.g. 9 and 17 = 9am to 4:59pm). Omit both for no hour filter.";
+const HOUR_END_DESC = "Exclusive end hour 0-24 in local time. Combine with hour_start.";
+const WEEKDAYS_DESC = "Restrict to specific weekdays. 0=Sunday, 1=Monday, …, 6=Saturday. Omit or pass [0,1,2,3,4,5,6] for no weekday filter.";
+
+function pickTimeFilters(args: {
+  hour_start?: number; hour_end?: number; weekdays?: number[];
+}): TimeFilters | undefined {
+  const tf: TimeFilters = {};
+  if (typeof args.hour_start === "number") tf.hourStart = args.hour_start;
+  if (typeof args.hour_end === "number") tf.hourEnd = args.hour_end;
+  if (Array.isArray(args.weekdays)) tf.weekdays = args.weekdays;
+  return Object.keys(tf).length === 0 ? undefined : tf;
+}
 
 /**
  * Bundle the Vetroscope app icon as data URIs in serverInfo.icons so MCP
@@ -46,7 +65,7 @@ const SERVER_ICONS = [
 
 const server = new McpServer({
   name: "vetroscope-mcp",
-  version: "0.1.1",
+  version: "0.2.0",
   title: "Vetroscope",
   description:
     "Read-only access to your local Vetroscope time-tracking database — apps, projects, goals, and individual sessions.",
@@ -74,17 +93,23 @@ server.registerTool(
   {
     title: "Get time report",
     description:
-      "Aggregate Vetroscope time report for a period: total active seconds, top apps, and top projects (with sub-projects nested when present — e.g. individual YouTube videos, SoundCloud songs, Netflix episodes). Apps include the user's custom display_name when set. Mirrors the desktop dashboard.",
+      "Aggregate Vetroscope time report for a period: total active seconds, top apps, and top projects (with sub-projects nested when present — e.g. individual YouTube videos, SoundCloud songs, Netflix episodes). Apps include the user's custom display_name when set. Optional hour-of-day / weekday filters narrow to working hours, weekends, etc. Mirrors the desktop dashboard.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).default("today"),
-      top_apps: z.number().int().min(1).max(500).optional().describe("Max apps returned (default 50)"),
-      top_projects: z.number().int().min(1).max(500).optional().describe("Max projects returned (default 50)"),
+      top_apps: z.number().int().min(0).max(500).optional().describe("Max apps returned (default 50, 0 to omit)"),
+      top_projects: z.number().int().min(0).max(500).optional().describe("Max projects returned (default 50, 0 to omit)"),
       top_sub_projects: z.number().int().min(0).max(200).optional().describe("Max sub-projects per project (default 25, 0 to omit)"),
+      hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
+      hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
+      weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
     },
   },
-  async ({ period, top_apps, top_projects, top_sub_projects }) =>
-    asJson(getReport(db(), period, {
-      topApps: top_apps, topProjects: top_projects, topSubProjects: top_sub_projects,
+  async (args) =>
+    asJson(getReport(db(), args.period, {
+      topApps: args.top_apps,
+      topProjects: args.top_projects,
+      topSubProjects: args.top_sub_projects,
+      timeFilters: pickTimeFilters(args),
     }))
 );
 
@@ -93,16 +118,19 @@ server.registerTool(
   {
     title: "Get per-app breakdown",
     description:
-      "Per-project breakdown for a single app over a period, with sub-projects nested when present (e.g. individual YouTube videos under the YouTube project). Use this when the user asks 'what was I working on in After Effects this week?' or 'which YouTube videos did I watch today?'",
+      "Per-project breakdown for a single app over a period, with sub-projects nested when present (e.g. individual YouTube videos under the YouTube project). Use this when the user asks 'what was I working on in After Effects this week?' or 'which YouTube videos did I watch today?' Supports the same hour-of-day / weekday filter as get_report.",
     inputSchema: {
       app: z.string().describe("Exact app name as recorded by Vetroscope (e.g. 'After Effects', 'Cursor'). Match the canonical name, not the user's custom display_name."),
       period: z.string().describe(PERIOD_DESCRIPTION).default("today"),
       limit: z.number().int().min(1).max(500).optional().describe("Max projects returned (default 100)"),
       top_sub_projects: z.number().int().min(0).max(200).optional().describe("Max sub-projects per project (default 25, 0 to omit)"),
+      hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
+      hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
+      weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
     },
   },
-  async ({ app, period, limit, top_sub_projects }) =>
-    asJson(getAppBreakdown(db(), app, period, limit, top_sub_projects))
+  async (args) =>
+    asJson(getAppBreakdown(db(), args.app, args.period, args.limit, args.top_sub_projects, pickTimeFilters(args)))
 );
 
 server.registerTool(
@@ -123,19 +151,100 @@ server.registerTool(
   {
     title: "Query raw entries",
     description:
-      "Filtered list of raw tracking entries. Useful for digging into specific projects or finding what window titles appeared. Defaults to active foreground entries only — pass mode='passive' or 'all' to include away-listening (background music while idle). Returns at most 5000 rows; default 200.",
+      "Filtered list of raw tracking entries. Useful for digging into specific projects, tags, or finding what window titles appeared. Defaults to active foreground entries only — pass mode='passive' or 'all' to include away-listening (background music while idle). Returns at most 5000 rows; default 200.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).optional(),
-      app: z.string().optional().describe("Restrict to a single app name"),
+      app: z.string().optional().describe("Restrict to a single app name (canonical name, not display_name)"),
       project: z.string().optional().describe("Restrict to a single project (exact match)"),
+      tag: z.string().optional().describe("Restrict to entries carrying a tag with this exact name"),
       search: z.string().optional().describe("Substring match against window title, project, or sub-project"),
       mode: z
         .enum(["active", "passive", "all"]).optional()
         .describe("active = foreground only (default), passive = away-listening only, all = both"),
+      hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
+      hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
+      weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
       limit: z.number().int().min(1).max(5000).optional(),
     },
   },
-  async (args) => asJson(queryEntries(db(), args))
+  async (args) => asJson(queryEntries(db(), {
+    period: args.period,
+    app: args.app,
+    project: args.project,
+    tag: args.tag,
+    search: args.search,
+    mode: args.mode,
+    timeFilters: pickTimeFilters(args),
+    limit: args.limit,
+  }))
+);
+
+server.registerTool(
+  "list_tags",
+  {
+    title: "List tags",
+    description:
+      "List all of the user's tags (id, name, color, sticky flag). Useful as a reference before calling get_tag_breakdown or filtering entries by tag.",
+    inputSchema: {},
+  },
+  async () => asJson(listTags(db()))
+);
+
+server.registerTool(
+  "get_tag_breakdown",
+  {
+    title: "Get tag breakdown",
+    description:
+      "Time-spent report for a single tag over a period: top apps and projects under the tag, daily series, active/passive split. Identify the tag by name (case-insensitive) — call list_tags first if you don't already know what's available.",
+    inputSchema: {
+      tag: z.string().describe("Tag name (case-insensitive). Numeric strings are treated as tag IDs."),
+      period: z.string().describe(PERIOD_DESCRIPTION).default("week"),
+      top_apps: z.number().int().min(0).max(500).optional().describe("Max apps returned (default 50, 0 to omit)"),
+      top_projects: z.number().int().min(0).max(500).optional().describe("Max projects returned (default 50, 0 to omit)"),
+      hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
+      hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
+      weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
+    },
+  },
+  async (args) => {
+    // Allow numeric strings to address by id, otherwise resolve by name.
+    const idMaybe = /^\d+$/.test(args.tag) ? Number(args.tag) : args.tag;
+    const result = getTagBreakdown(db(), idMaybe, args.period, {
+      topApps: args.top_apps,
+      topProjects: args.top_projects,
+      timeFilters: pickTimeFilters(args),
+    });
+    if (!result) {
+      return {
+        content: [{ type: "text" as const, text: `No tag found matching "${args.tag}". Call list_tags to see available tags.` }],
+        isError: true,
+      };
+    }
+    return asJson(result);
+  }
+);
+
+server.registerTool(
+  "get_app_stats",
+  {
+    title: "Get app statistics",
+    description:
+      "Deeper statistics for a single app: lifetime totals (days active, first/last seen, average per active day), period totals, top projects, daily series, hour-of-day distribution (24 buckets), and weekday distribution (7 buckets). Use this for usage-pattern questions like 'when do I usually use Cursor?' or 'how has my After Effects time trended this month?'",
+    inputSchema: {
+      app: z.string().describe("Exact app name as recorded by Vetroscope (canonical, not display_name)."),
+      period: z.string().describe(PERIOD_DESCRIPTION + ". Defaults to 'week'.").default("week"),
+    },
+  },
+  async ({ app, period }) => {
+    const result = getAppStats(db(), app, period);
+    if (!result) {
+      return {
+        content: [{ type: "text" as const, text: `No entries found for app "${app}". Use get_report to see canonical app names.` }],
+        isError: true,
+      };
+    }
+    return asJson(result);
+  }
 );
 
 async function main() {

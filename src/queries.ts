@@ -115,6 +115,42 @@ function ignoredAppsClause(ignored: string[], alias = "e"): { clause: string; pa
   };
 }
 
+/**
+ * Optional hour-of-day / weekday filters layered on top of any base WHERE.
+ * Hours are local time and form a half-open range: `hourStart <= h < hourEnd`
+ * (so 9..17 means 9am through 4:59pm). Weekdays follow SQLite's `%w` —
+ * 0=Sunday, 1=Monday, …, 6=Saturday.
+ */
+export interface TimeFilters {
+  hourStart?: number;
+  hourEnd?: number;
+  weekdays?: number[];
+}
+
+function buildTimeFilters(filters: TimeFilters | undefined, alias = "e"): {
+  clause: string;
+  params: number[];
+} {
+  if (!filters) return { clause: "", params: [] };
+  const col = alias ? `${alias}.timestamp` : "timestamp";
+  const parts: string[] = [];
+  const params: number[] = [];
+  const { hourStart, hourEnd, weekdays } = filters;
+  if (typeof hourStart === "number" && typeof hourEnd === "number"
+      && !(hourStart === 0 && hourEnd === 24)) {
+    parts.push(`CAST(strftime('%H', ${col}, 'localtime') AS INTEGER) >= ?`);
+    parts.push(`CAST(strftime('%H', ${col}, 'localtime') AS INTEGER) < ?`);
+    params.push(hourStart, hourEnd);
+  }
+  if (weekdays && weekdays.length > 0 && weekdays.length < 7) {
+    const placeholders = weekdays.map(() => "?").join(",");
+    parts.push(`CAST(strftime('%w', ${col}, 'localtime') AS INTEGER) IN (${placeholders})`);
+    params.push(...weekdays);
+  }
+  if (parts.length === 0) return { clause: "", params: [] };
+  return { clause: " AND " + parts.join(" AND "), params };
+}
+
 // ── get_report ───────────────────────────────────────────────────────────
 
 export interface AppTotal {
@@ -174,13 +210,19 @@ export interface ReportResult {
 export function getReport(
   db: Database.Database,
   period: string,
-  opts: { topApps?: number; topProjects?: number; topSubProjects?: number } = {}
+  opts: {
+    topApps?: number;
+    topProjects?: number;
+    topSubProjects?: number;
+    timeFilters?: TimeFilters;
+  } = {}
 ): ReportResult {
   const range = parsePeriod(period);
   const ignored = getIgnoredApps(db);
   const { clause: iC, params: iP } = ignoredAppsClause(ignored);
-  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${iC}`;
-  const baseParams = [range.start, range.end, ...iP];
+  const { clause: tC, params: tP } = buildTimeFilters(opts.timeFilters);
+  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${iC}${tC}`;
+  const baseParams = [range.start, range.end, ...iP, ...tP];
   const active = activeFilter(db);
   const passive = passiveFilter(db);
   const displayNames = loadDisplayNames(db);
@@ -380,10 +422,12 @@ export function getAppBreakdown(
   period: string,
   limit = 100,
   topSubProjects = 25,
+  timeFilters?: TimeFilters,
 ): AppBreakdownResult {
   const range = parsePeriod(period);
-  const where = `e.timestamp >= ? AND e.timestamp < ? AND e.app_name = ?`;
-  const params = [range.start, range.end, app];
+  const { clause: tC, params: tP } = buildTimeFilters(timeFilters);
+  const where = `e.timestamp >= ? AND e.timestamp < ? AND e.app_name = ?${tC}`;
+  const params = [range.start, range.end, app, ...tP];
   const active = activeFilter(db);
   const passive = passiveFilter(db);
   const displayNames = loadDisplayNames(db);
@@ -576,9 +620,13 @@ export interface QueryEntriesArgs {
   period?: string;
   app?: string;
   project?: string;
+  /** Restrict to entries carrying a tag with this exact name. */
+  tag?: string;
   search?: string;
   /** "active" (default) | "passive" | "all". */
   mode?: "active" | "passive" | "all";
+  /** Optional hour-of-day / weekday filter. */
+  timeFilters?: TimeFilters;
   limit?: number;
 }
 
@@ -601,6 +649,10 @@ export function queryEntries(db: Database.Database, args: QueryEntriesArgs): Ent
     where.push("e.project = ?");
     params.push(args.project);
   }
+  if (args.tag) {
+    where.push("t.name = ?");
+    params.push(args.tag);
+  }
   if (args.search) {
     where.push("(e.window_title LIKE ? OR e.project LIKE ? OR e.sub_project LIKE ?)");
     const term = `%${args.search}%`;
@@ -612,6 +664,11 @@ export function queryEntries(db: Database.Database, args: QueryEntriesArgs): Ent
   if (hasPassive) {
     if (mode === "active") where.push("e.is_passive = 0");
     else if (mode === "passive") where.push("e.is_passive = 1");
+  }
+  const { clause: tfC, params: tfP } = buildTimeFilters(args.timeFilters);
+  if (tfC) {
+    where.push(tfC.replace(/^ AND /, ""));
+    params.push(...tfP);
   }
 
   const passiveSelect = hasPassive ? "e.is_passive AS isPassive" : "0 AS isPassive";
@@ -641,4 +698,354 @@ export function queryEntries(db: Database.Database, args: QueryEntriesArgs): Ent
     Omit<EntryRow, "isPassive"> & { isPassive: number }
   >;
   return rows.map((r) => ({ ...r, isPassive: r.isPassive === 1 }));
+}
+
+// ── list_tags ─────────────────────────────────────────────────────────────
+
+export interface TagInfo {
+  id: number;
+  name: string;
+  color: string;
+  /**
+   * Sticky tags re-attach automatically to future entries matching the
+   * (app, project) pairs they were applied to. Useful context for the LLM
+   * when reasoning about why a tag shows up where it does.
+   */
+  sticky: boolean;
+}
+
+export function listTags(db: Database.Database): TagInfo[] {
+  // `deleted` is the soft-delete flag used by Vetroscope's sync layer; we
+  // never want to surface tombstoned tags. Older DBs may not have it.
+  const cols = db.prepare(`PRAGMA table_info(tags)`).all() as Array<{ name: string }>;
+  const hasDeleted = cols.some((c) => c.name === "deleted");
+  const hasSticky = cols.some((c) => c.name === "sticky");
+  const where = hasDeleted ? "WHERE deleted = 0" : "";
+  const stickySelect = hasSticky ? "sticky" : "0 AS sticky";
+  const rows = db
+    .prepare(
+      `SELECT id, name, color, ${stickySelect} FROM tags ${where} ORDER BY name COLLATE NOCASE`
+    )
+    .all() as Array<{ id: number; name: string; color: string; sticky: number }>;
+  return rows.map((r) => ({ id: r.id, name: r.name, color: r.color, sticky: r.sticky === 1 }));
+}
+
+// ── get_tag_breakdown ─────────────────────────────────────────────────────
+
+export interface TagBreakdownResult extends Range {
+  tag: TagInfo;
+  /** Active foreground seconds carrying this tag. */
+  totalSeconds: number;
+  /** Background away-listening seconds carrying this tag. */
+  passiveSeconds: number;
+  /** Apps this tag appears under, sorted by total seconds desc. */
+  apps: AppTotal[];
+  /** Projects this tag appears under, sorted by total seconds desc. */
+  projects: ProjectTotal[];
+  /** Per-day series of active seconds for the tag across the period. */
+  daily: Array<{ date: string; seconds: number }>;
+}
+
+/** Resolve a tag by name (case-insensitive) or numeric id. Returns null if absent. */
+function resolveTag(db: Database.Database, identifier: string | number): TagInfo | null {
+  const tags = listTags(db);
+  if (typeof identifier === "number") {
+    return tags.find((t) => t.id === identifier) ?? null;
+  }
+  const lower = identifier.toLowerCase();
+  return tags.find((t) => t.name.toLowerCase() === lower) ?? null;
+}
+
+export function getTagBreakdown(
+  db: Database.Database,
+  identifier: string | number,
+  period: string,
+  opts: { topApps?: number; topProjects?: number; timeFilters?: TimeFilters } = {}
+): TagBreakdownResult | null {
+  const tag = resolveTag(db, identifier);
+  if (!tag) return null;
+  const range = parsePeriod(period);
+  const ignored = getIgnoredApps(db);
+  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
+  const { clause: tC, params: tP } = buildTimeFilters(opts.timeFilters);
+  const where = `e.timestamp >= ? AND e.timestamp < ? AND e.tag_id = ?${iC}${tC}`;
+  const params = [range.start, range.end, tag.id, ...iP, ...tP];
+  const active = activeFilter(db);
+  const passive = passiveFilter(db);
+  const displayNames = loadDisplayNames(db);
+  const dn = (app: string) => displayNames.get(app) ?? null;
+
+  const totalActive = db
+    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${where}${active}`)
+    .get(...params) as { seconds: number | null };
+  const totalPassive = db
+    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${where}${passive}`)
+    .get(...params) as { seconds: number | null };
+
+  const activeApps = db
+    .prepare(
+      `SELECT e.app_name AS app, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${where}${active}
+        GROUP BY e.app_name`
+    )
+    .all(...params) as Array<{ app: string; seconds: number }>;
+  const passiveApps = db
+    .prepare(
+      `SELECT e.app_name AS app, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${where}${passive}
+        GROUP BY e.app_name`
+    )
+    .all(...params) as Array<{ app: string; seconds: number }>;
+
+  const appMap = new Map<string, AppTotal>();
+  for (const r of activeApps) {
+    appMap.set(r.app, { app: r.app, displayName: dn(r.app), seconds: r.seconds, passiveSeconds: 0 });
+  }
+  for (const r of passiveApps) {
+    const existing = appMap.get(r.app);
+    if (existing) existing.passiveSeconds = r.seconds;
+    else appMap.set(r.app, { app: r.app, displayName: dn(r.app), seconds: 0, passiveSeconds: r.seconds });
+  }
+  const apps = [...appMap.values()]
+    .sort((a, b) => (b.seconds + b.passiveSeconds) - (a.seconds + a.passiveSeconds))
+    .slice(0, opts.topApps ?? 50);
+
+  const activeProjects = db
+    .prepare(
+      `SELECT e.app_name AS app, e.project AS project, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${where}${active} AND e.project IS NOT NULL AND e.project != ''
+        GROUP BY e.app_name, e.project`
+    )
+    .all(...params) as Array<{ app: string; project: string; seconds: number }>;
+  const passiveProjects = db
+    .prepare(
+      `SELECT e.app_name AS app, e.project AS project, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${where}${passive} AND e.project IS NOT NULL AND e.project != ''
+        GROUP BY e.app_name, e.project`
+    )
+    .all(...params) as Array<{ app: string; project: string; seconds: number }>;
+
+  const projMap = new Map<string, ProjectTotal>();
+  const pkey = (a: string, p: string) => `${a}\0${p}`;
+  for (const r of activeProjects) {
+    projMap.set(pkey(r.app, r.project), {
+      app: r.app, displayName: dn(r.app), project: r.project,
+      seconds: r.seconds, passiveSeconds: 0, subProjects: [],
+    });
+  }
+  for (const r of passiveProjects) {
+    const k = pkey(r.app, r.project);
+    const existing = projMap.get(k);
+    if (existing) existing.passiveSeconds = r.seconds;
+    else projMap.set(k, {
+      app: r.app, displayName: dn(r.app), project: r.project,
+      seconds: 0, passiveSeconds: r.seconds, subProjects: [],
+    });
+  }
+  attachSubProjects(db, projMap, where, params, 25);
+  const projects = [...projMap.values()]
+    .sort((a, b) => (b.seconds + b.passiveSeconds) - (a.seconds + a.passiveSeconds))
+    .slice(0, opts.topProjects ?? 50);
+
+  // Per-day active series — useful for trend questions ("am I doing more
+  // Vetroscope Dev this week than last?").
+  const dailyRows = db
+    .prepare(
+      `SELECT DATE(e.timestamp, 'localtime') AS date, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${where}${active}
+        GROUP BY DATE(e.timestamp, 'localtime')
+        ORDER BY date`
+    )
+    .all(...params) as Array<{ date: string; seconds: number }>;
+
+  return {
+    ...range,
+    tag,
+    totalSeconds: totalActive.seconds ?? 0,
+    passiveSeconds: totalPassive.seconds ?? 0,
+    apps,
+    projects,
+    daily: dailyRows,
+  };
+}
+
+// ── get_app_stats ─────────────────────────────────────────────────────────
+
+export interface AppStatsResult {
+  app: string;
+  displayName: string | null;
+  /**
+   * Lifetime totals (active foreground seconds across the entire DB).
+   * Use `period` for a windowed view via daily / hourOfDay / weekday.
+   */
+  lifetime: {
+    totalSeconds: number;
+    passiveSeconds: number;
+    daysActive: number;
+    firstSeen: string | null;
+    lastSeen: string | null;
+    avgSecondsPerActiveDay: number;
+  };
+  /** Period totals (matches the period argument). */
+  period: Range & {
+    totalSeconds: number;
+    passiveSeconds: number;
+  };
+  /** Top projects within the period with active/passive split. */
+  topProjects: ProjectTotal[];
+  /** Daily active seconds within the period. */
+  daily: Array<{ date: string; seconds: number }>;
+  /** 24-hour distribution of active seconds within the period. */
+  hourOfDay: Array<{ hour: number; seconds: number }>;
+  /** Day-of-week distribution within the period. 0=Sunday. */
+  weekday: Array<{ weekday: number; seconds: number }>;
+}
+
+export function getAppStats(
+  db: Database.Database,
+  app: string,
+  period = "week",
+): AppStatsResult | null {
+  const range = parsePeriod(period);
+  const active = activeFilter(db);
+  const passive = passiveFilter(db);
+  const displayNames = loadDisplayNames(db);
+  const dn = displayNames.get(app) ?? null;
+
+  // Lifetime stats — no period filter, just app filter.
+  const lifetimeRow = db
+    .prepare(
+      `SELECT ${SECONDS_EXPR} AS seconds,
+              MIN(e.timestamp) AS firstSeen,
+              MAX(e.timestamp) AS lastSeen,
+              COUNT(DISTINCT DATE(e.timestamp, 'localtime')) AS daysActive
+         FROM entries e
+        WHERE e.app_name = ?${active}`
+    )
+    .get(app) as { seconds: number | null; firstSeen: string | null; lastSeen: string | null; daysActive: number };
+  if (!lifetimeRow.seconds) return null;
+  const lifetimePassive = db
+    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE e.app_name = ?${passive}`)
+    .get(app) as { seconds: number | null };
+
+  const periodWhere = `e.app_name = ? AND e.timestamp >= ? AND e.timestamp < ?`;
+  const periodParams = [app, range.start, range.end];
+
+  const periodActive = db
+    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${periodWhere}${active}`)
+    .get(...periodParams) as { seconds: number | null };
+  const periodPassive = db
+    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${periodWhere}${passive}`)
+    .get(...periodParams) as { seconds: number | null };
+
+  // Top projects within the period — same active/passive split as the
+  // app_breakdown tool but flat (no sub-projects nested) since stats is a
+  // higher-level overview.
+  const projActive = db
+    .prepare(
+      `SELECT e.app_name AS app, COALESCE(e.project, '') AS project, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${periodWhere}${active}
+        GROUP BY e.project`
+    )
+    .all(...periodParams) as Array<{ app: string; project: string; seconds: number }>;
+  const projPassive = db
+    .prepare(
+      `SELECT e.app_name AS app, COALESCE(e.project, '') AS project, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${periodWhere}${passive}
+        GROUP BY e.project`
+    )
+    .all(...periodParams) as Array<{ app: string; project: string; seconds: number }>;
+  const projMap = new Map<string, ProjectTotal>();
+  for (const r of projActive) {
+    projMap.set(r.project, {
+      app: r.app, displayName: dn, project: r.project,
+      seconds: r.seconds, passiveSeconds: 0, subProjects: [],
+    });
+  }
+  for (const r of projPassive) {
+    const existing = projMap.get(r.project);
+    if (existing) existing.passiveSeconds = r.seconds;
+    else projMap.set(r.project, {
+      app: r.app, displayName: dn, project: r.project,
+      seconds: 0, passiveSeconds: r.seconds, subProjects: [],
+    });
+  }
+  const topProjects = [...projMap.values()]
+    .sort((a, b) => (b.seconds + b.passiveSeconds) - (a.seconds + a.passiveSeconds))
+    .slice(0, 25);
+
+  const daily = db
+    .prepare(
+      `SELECT DATE(e.timestamp, 'localtime') AS date, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${periodWhere}${active}
+        GROUP BY DATE(e.timestamp, 'localtime')
+        ORDER BY date`
+    )
+    .all(...periodParams) as Array<{ date: string; seconds: number }>;
+
+  // Densify hour-of-day to all 24 hours so callers don't have to sparse-fill.
+  const hourRows = db
+    .prepare(
+      `SELECT CAST(strftime('%H', e.timestamp, 'localtime') AS INTEGER) AS hour,
+              ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${periodWhere}${active}
+        GROUP BY hour
+        ORDER BY hour`
+    )
+    .all(...periodParams) as Array<{ hour: number; seconds: number }>;
+  const hourMap = new Map<number, number>(hourRows.map((r) => [r.hour, r.seconds]));
+  const hourOfDay = Array.from({ length: 24 }, (_, h) => ({
+    hour: h, seconds: hourMap.get(h) ?? 0,
+  }));
+
+  const weekdayRows = db
+    .prepare(
+      `SELECT CAST(strftime('%w', e.timestamp, 'localtime') AS INTEGER) AS weekday,
+              ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${periodWhere}${active}
+        GROUP BY weekday
+        ORDER BY weekday`
+    )
+    .all(...periodParams) as Array<{ weekday: number; seconds: number }>;
+  const wdMap = new Map<number, number>(weekdayRows.map((r) => [r.weekday, r.seconds]));
+  const weekday = Array.from({ length: 7 }, (_, w) => ({
+    weekday: w, seconds: wdMap.get(w) ?? 0,
+  }));
+
+  const totalSeconds = lifetimeRow.seconds;
+  const avgSecondsPerActiveDay = lifetimeRow.daysActive > 0
+    ? Math.round(totalSeconds / lifetimeRow.daysActive)
+    : 0;
+
+  return {
+    app,
+    displayName: dn,
+    lifetime: {
+      totalSeconds,
+      passiveSeconds: lifetimePassive.seconds ?? 0,
+      daysActive: lifetimeRow.daysActive,
+      firstSeen: lifetimeRow.firstSeen,
+      lastSeen: lifetimeRow.lastSeen,
+      avgSecondsPerActiveDay,
+    },
+    period: {
+      ...range,
+      totalSeconds: periodActive.seconds ?? 0,
+      passiveSeconds: periodPassive.seconds ?? 0,
+    },
+    topProjects,
+    daily,
+    hourOfDay,
+    weekday,
+  };
 }
