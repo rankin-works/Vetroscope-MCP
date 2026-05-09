@@ -14,6 +14,13 @@ import {
   listTags,
   getTagBreakdown,
   getAppStats,
+  listMarkers,
+  getSessions,
+  getCurrentStatus,
+  getGoalAchievements,
+  listProjects,
+  getCalendar,
+  getDeviceBreakdown,
   type TimeFilters,
 } from "./queries.js";
 
@@ -65,7 +72,7 @@ const SERVER_ICONS = [
 
 const server = new McpServer({
   name: "vetroscope-mcp",
-  version: "0.2.0",
+  version: "0.3.0",
   title: "Vetroscope",
   description:
     "Read-only access to your local Vetroscope time-tracking database — apps, projects, goals, and individual sessions.",
@@ -245,6 +252,109 @@ server.registerTool(
     }
     return asJson(result);
   }
+);
+
+server.registerTool(
+  "list_markers",
+  {
+    title: "List timeline markers",
+    description:
+      "User-placed markers on the Vetroscope timeline (timestamp, optional end_timestamp for regions, label, color, icon). Pass a period to scope to a window — markers whose region OVERLAPS the period are returned. Omit period to list every marker.",
+    inputSchema: {
+      period: z.string().describe(PERIOD_DESCRIPTION).optional(),
+    },
+  },
+  async ({ period }) => asJson(listMarkers(db(), period))
+);
+
+server.registerTool(
+  "get_sessions",
+  {
+    title: "Get activity sessions",
+    description:
+      "Continuous activity blocks reconstructed from the raw 30s entries — the natural grain for 'what did I work on this morning?'. Two consecutive entries are one session when they share the same (app, project, sub_project) and are within 90s of each other. Each session reports start/end/duration and tag/app metadata.",
+    inputSchema: {
+      period: z.string().describe(PERIOD_DESCRIPTION).default("today"),
+      app: z.string().optional().describe("Restrict to a single app (canonical name)"),
+      project: z.string().optional().describe("Restrict to a single project (exact match)"),
+      tag: z.string().optional().describe("Restrict to entries carrying a tag with this exact name"),
+      min_seconds: z.number().int().min(0).max(86400).optional().describe("Drop sessions shorter than this (default 0 — keep all)"),
+      hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
+      hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
+      weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
+      limit: z.number().int().min(1).max(5000).optional().describe("Max sessions returned (default 200)"),
+    },
+  },
+  async (args) =>
+    asJson(getSessions(db(), args.period, {
+      app: args.app, project: args.project, tag: args.tag,
+      minSeconds: args.min_seconds, limit: args.limit,
+      timeFilters: pickTimeFilters(args),
+    }))
+);
+
+server.registerTool(
+  "get_current_status",
+  {
+    title: "Get current tracking status",
+    description:
+      "Most recent activity: what app / project / sub-project the tracker last logged, how many seconds ago, and whether the tracker appears to be live (state='tracking') or quiescent (state='idle'). Use this for 'what am I doing right now?' questions.",
+    inputSchema: {},
+  },
+  async () => asJson(getCurrentStatus(db()))
+);
+
+server.registerTool(
+  "get_goal_achievements",
+  {
+    title: "Get goal achievement history",
+    description:
+      "Historical record of goals the user hit — one row per (goal, day). Each row carries a snapshot of the goal as it was when achieved (so renamed/deleted goals still report sensibly). Useful for streak questions ('how many days in a row…') or summaries ('which goals did I hit last week?').",
+    inputSchema: {
+      period: z.string().describe(PERIOD_DESCRIPTION).default("month"),
+    },
+  },
+  async ({ period }) => asJson(getGoalAchievements(db(), period))
+);
+
+server.registerTool(
+  "list_projects",
+  {
+    title: "List all projects",
+    description:
+      "Every (app, project) pair ever recorded with all-time totals, days active, and first/last seen. Optional case-insensitive substring search against project name or app. Useful for 'have I ever worked on something called X?' or 'what's my biggest project all-time?'",
+    inputSchema: {
+      search: z.string().optional().describe("Case-insensitive substring match against project name or app name"),
+      limit: z.number().int().min(1).max(5000).optional().describe("Max projects returned (default 200)"),
+    },
+  },
+  async (args) => asJson(listProjects(db(), args))
+);
+
+server.registerTool(
+  "get_calendar",
+  {
+    title: "Get daily totals (calendar / heatmap)",
+    description:
+      "Dense per-day series of active and passive seconds for a period. Default period is 'year' for the GitHub-contribution-grid heatmap; pass any other period for narrower windows. Days with zero activity are explicitly included so streak / longest-gap analysis is straightforward.",
+    inputSchema: {
+      period: z.string().describe(PERIOD_DESCRIPTION + ". Defaults to 'year'.").default("year"),
+    },
+  },
+  async ({ period }) => asJson(getCalendar(db(), period))
+);
+
+server.registerTool(
+  "get_device_breakdown",
+  {
+    title: "Get per-device time breakdown",
+    description:
+      "Time per device for users who run Vetroscope across multiple machines (or paired with the browser extension). Each device reports total active / passive seconds, days active, first/last seen, and most-frequent platform. The user's current device is flagged with isCurrent=true.",
+    inputSchema: {
+      period: z.string().describe(PERIOD_DESCRIPTION).default("month"),
+    },
+  },
+  async ({ period }) => asJson(getDeviceBreakdown(db(), period))
 );
 
 async function main() {

@@ -1049,3 +1049,595 @@ export function getAppStats(
     weekday,
   };
 }
+
+// ── list_markers ──────────────────────────────────────────────────────────
+
+export interface Marker {
+  id: number;
+  timestamp: string;
+  /** Present when this marker is a region (start + end). Null for point markers. */
+  endTimestamp: string | null;
+  label: string;
+  color: string;
+  icon: string;
+}
+
+/**
+ * User-placed timeline events. Vetroscope soft-deletes markers (deleted=1)
+ * for sync purposes; we only return live ones. Period filter is optional —
+ * omit to return every marker in the DB.
+ */
+export function listMarkers(db: Database.Database, period?: string): Marker[] {
+  const cols = db.prepare(`PRAGMA table_info(markers)`).all() as Array<{ name: string }>;
+  const hasDeleted = cols.some((c) => c.name === "deleted");
+  const hasEnd = cols.some((c) => c.name === "end_timestamp");
+  const endSelect = hasEnd ? "end_timestamp AS endTimestamp" : "NULL AS endTimestamp";
+  const baseFilter = hasDeleted ? "deleted = 0" : "1 = 1";
+  const where: string[] = [baseFilter];
+  const params: (string | number)[] = [];
+  if (period) {
+    const range = parsePeriod(period);
+    // Include any marker whose region OVERLAPS the period: start before end-of-period
+    // AND (no end OR end after start-of-period).
+    where.push("timestamp < ?");
+    params.push(range.end);
+    if (hasEnd) {
+      where.push("(end_timestamp IS NULL OR end_timestamp >= ?)");
+      params.push(range.start);
+    } else {
+      where.push("timestamp >= ?");
+      params.push(range.start);
+    }
+  }
+  const rows = db
+    .prepare(
+      `SELECT id, timestamp, ${endSelect}, label, color, icon
+         FROM markers
+        WHERE ${where.join(" AND ")}
+        ORDER BY timestamp DESC`
+    )
+    .all(...params) as Marker[];
+  return rows;
+}
+
+// ── get_sessions ──────────────────────────────────────────────────────────
+
+export interface Session {
+  app: string;
+  displayName: string | null;
+  project: string | null;
+  subProject: string | null;
+  tagName: string | null;
+  startTime: string;
+  endTime: string;
+  totalSeconds: number;
+  isPassive: boolean;
+}
+
+/**
+ * Continuous activity blocks reconstructed from the 30s poll entries.
+ * Two consecutive entries belong to the same session when (a) they share
+ * the same (app, project) pair and (b) their timestamps are within 90s
+ * of each other — three poll intervals tolerates one missed poll without
+ * breaking the session. This is the same heuristic Vetroscope uses for
+ * the Activity view in the desktop app.
+ */
+export function getSessions(
+  db: Database.Database,
+  period: string,
+  opts: {
+    app?: string;
+    project?: string;
+    tag?: string;
+    minSeconds?: number;
+    limit?: number;
+    timeFilters?: TimeFilters;
+  } = {}
+): Session[] {
+  const range = parsePeriod(period);
+  const { clause: tC, params: tP } = buildTimeFilters(opts.timeFilters);
+  const where: string[] = ["e.timestamp >= ?", "e.timestamp < ?"];
+  const params: (string | number)[] = [range.start, range.end];
+  if (opts.app) { where.push("e.app_name = ?"); params.push(opts.app); }
+  if (opts.project) { where.push("e.project = ?"); params.push(opts.project); }
+  if (opts.tag) { where.push("t.name = ?"); params.push(opts.tag); }
+  if (tC) { where.push(tC.replace(/^ AND /, "")); params.push(...tP); }
+
+  const hasPassive = hasPassiveColumn(db);
+  const hasSubProj = hasSubProjectColumn(db);
+  const passiveSelect = hasPassive ? "e.is_passive AS isPassive" : "0 AS isPassive";
+  const subProjectSelect = hasSubProj ? "e.sub_project AS subProject" : "NULL AS subProject";
+  const overridesJoin = hasAppOverridesTable(db)
+    ? "LEFT JOIN app_overrides o ON o.app_name = e.app_name"
+    : "";
+  const displayNameSelect = hasAppOverridesTable(db)
+    ? "o.display_name AS displayName"
+    : "NULL AS displayName";
+
+  const rows = db
+    .prepare(
+      `SELECT e.timestamp, e.app_name AS app, ${displayNameSelect},
+              e.project, ${subProjectSelect}, t.name AS tagName, ${passiveSelect}
+         FROM entries e
+         LEFT JOIN tags t ON t.id = e.tag_id
+         ${overridesJoin}
+        WHERE ${where.join(" AND ")}
+        ORDER BY e.timestamp ASC`
+    )
+    .all(...params) as Array<{
+    timestamp: string;
+    app: string;
+    displayName: string | null;
+    project: string | null;
+    subProject: string | null;
+    tagName: string | null;
+    isPassive: number;
+  }>;
+
+  const SESSION_GAP_MS = 90_000;
+  const sessions: Session[] = [];
+  let cur: (Session & { _last: number }) | null = null;
+  for (const r of rows) {
+    const ts = Date.parse(r.timestamp);
+    const matches =
+      cur != null &&
+      cur.app === r.app &&
+      cur.project === r.project &&
+      cur.subProject === r.subProject &&
+      cur.isPassive === (r.isPassive === 1) &&
+      ts - cur._last <= SESSION_GAP_MS;
+    if (matches && cur) {
+      cur.endTime = r.timestamp;
+      cur.totalSeconds += POLL_SECONDS;
+      cur._last = ts;
+    } else {
+      if (cur) {
+        const { _last, ...session } = cur;
+        sessions.push(session);
+      }
+      cur = {
+        app: r.app,
+        displayName: r.displayName,
+        project: r.project,
+        subProject: r.subProject,
+        tagName: r.tagName,
+        startTime: r.timestamp,
+        endTime: r.timestamp,
+        totalSeconds: POLL_SECONDS,
+        isPassive: r.isPassive === 1,
+        _last: ts,
+      };
+    }
+  }
+  if (cur) {
+    const { _last, ...session } = cur;
+    sessions.push(session);
+  }
+
+  const minSec = opts.minSeconds ?? 0;
+  const filtered = minSec > 0 ? sessions.filter((s) => s.totalSeconds >= minSec) : sessions;
+  // Newest first matches Activity view ordering.
+  filtered.sort((a, b) => b.endTime.localeCompare(a.endTime));
+  return filtered.slice(0, Math.min(Math.max(opts.limit ?? 200, 1), 5000));
+}
+
+// ── get_current_status ────────────────────────────────────────────────────
+
+export interface CurrentStatus {
+  /** ISO timestamp of the latest entry (null when DB is empty). */
+  timestamp: string | null;
+  /** Seconds elapsed since that entry was recorded. */
+  secondsSince: number | null;
+  /**
+   * "tracking" when the latest entry is within ~90s, otherwise "idle".
+   * Idle simply means the tracker hasn't recorded anything recently —
+   * Vetroscope itself may be paused, or you may not be at the device.
+   */
+  state: "tracking" | "idle" | "unknown";
+  app: string | null;
+  displayName: string | null;
+  project: string | null;
+  subProject: string | null;
+  tagName: string | null;
+  isPassive: boolean | null;
+}
+
+export function getCurrentStatus(db: Database.Database): CurrentStatus {
+  const hasPassive = hasPassiveColumn(db);
+  const hasSubProj = hasSubProjectColumn(db);
+  const overridesJoin = hasAppOverridesTable(db)
+    ? "LEFT JOIN app_overrides o ON o.app_name = e.app_name"
+    : "";
+  const displayNameSelect = hasAppOverridesTable(db)
+    ? "o.display_name AS displayName"
+    : "NULL AS displayName";
+  const passiveSelect = hasPassive ? "e.is_passive AS isPassive" : "0 AS isPassive";
+  const subProjectSelect = hasSubProj ? "e.sub_project AS subProject" : "NULL AS subProject";
+
+  const row = db
+    .prepare(
+      `SELECT e.timestamp, e.app_name AS app, ${displayNameSelect},
+              e.project, ${subProjectSelect}, t.name AS tagName, ${passiveSelect}
+         FROM entries e
+         LEFT JOIN tags t ON t.id = e.tag_id
+         ${overridesJoin}
+        ORDER BY e.timestamp DESC
+        LIMIT 1`
+    )
+    .get() as
+    | {
+        timestamp: string;
+        app: string;
+        displayName: string | null;
+        project: string | null;
+        subProject: string | null;
+        tagName: string | null;
+        isPassive: number;
+      }
+    | undefined;
+
+  if (!row) {
+    return {
+      timestamp: null, secondsSince: null, state: "unknown",
+      app: null, displayName: null, project: null, subProject: null, tagName: null, isPassive: null,
+    };
+  }
+  const ageMs = Date.now() - Date.parse(row.timestamp);
+  const secondsSince = Math.max(0, Math.round(ageMs / 1000));
+  // 90s = three poll intervals; if we haven't seen a tick in that window the
+  // tracker is effectively asleep from the LLM's perspective.
+  const state = secondsSince <= 90 ? "tracking" : "idle";
+  return {
+    timestamp: row.timestamp,
+    secondsSince,
+    state,
+    app: row.app,
+    displayName: row.displayName,
+    project: row.project,
+    subProject: row.subProject,
+    tagName: row.tagName,
+    isPassive: row.isPassive === 1,
+  };
+}
+
+// ── get_goal_achievements ─────────────────────────────────────────────────
+
+export interface GoalAchievement {
+  id: number;
+  goalId: number | null;
+  /** Goal at the time of achievement (snapshot — survives later edits). */
+  type: "app" | "overall" | "tag";
+  app: string | null;
+  tagName: string | null;
+  targetSeconds: number;
+  currentSeconds: number;
+  /** Local YYYY-MM-DD on which the goal was hit. */
+  date: string;
+  /** ISO timestamp when the achievement was first recorded. */
+  achievedAt: string;
+}
+
+interface GoalSnapshot {
+  type?: string;
+  app_name?: string | null;
+  tag_name?: string | null;
+  target_seconds?: number;
+}
+
+export function getGoalAchievements(
+  db: Database.Database,
+  period = "month"
+): GoalAchievement[] {
+  const range = parsePeriod(period);
+  // `date` is a local YYYY-MM-DD string, not an ISO timestamp, so we filter
+  // on the YYYY-MM-DD prefix of the period's start/end instead of the full
+  // ISO bounds.
+  const startDate = range.start.slice(0, 10);
+  const endDate = range.end.slice(0, 10);
+  const cols = db.prepare(`PRAGMA table_info(goal_achievements)`).all() as Array<{ name: string }>;
+  const hasDeleted = cols.some((c) => c.name === "deleted");
+  const where = hasDeleted
+    ? "date >= ? AND date < ? AND deleted = 0"
+    : "date >= ? AND date < ?";
+  const rows = db
+    .prepare(
+      `SELECT id, goal_id AS goalId, goal_snapshot AS goalSnapshot,
+              date, achieved_at AS achievedAt, current_seconds AS currentSeconds
+         FROM goal_achievements
+        WHERE ${where}
+        ORDER BY date DESC, achieved_at DESC`
+    )
+    .all(startDate, endDate) as Array<{
+    id: number;
+    goalId: number | null;
+    goalSnapshot: string;
+    date: string;
+    achievedAt: string;
+    currentSeconds: number;
+  }>;
+  return rows.map((r): GoalAchievement => {
+    let snap: GoalSnapshot = {};
+    try { snap = JSON.parse(r.goalSnapshot) as GoalSnapshot; } catch { /* keep empty */ }
+    const type = (snap.type === "app" || snap.type === "overall" || snap.type === "tag")
+      ? snap.type : "app";
+    return {
+      id: r.id,
+      goalId: r.goalId,
+      type,
+      app: snap.app_name ?? null,
+      tagName: snap.tag_name ?? null,
+      targetSeconds: snap.target_seconds ?? 0,
+      currentSeconds: r.currentSeconds,
+      date: r.date,
+      achievedAt: r.achievedAt,
+    };
+  });
+}
+
+// ── list_projects ─────────────────────────────────────────────────────────
+
+export interface ProjectListEntry {
+  app: string;
+  displayName: string | null;
+  project: string;
+  totalSeconds: number;
+  passiveSeconds: number;
+  daysActive: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+/**
+ * Every project ever recorded, with all-time totals and first/last seen.
+ * Optional substring search (case-insensitive) makes fuzzy lookups easy.
+ */
+export function listProjects(
+  db: Database.Database,
+  opts: { search?: string; limit?: number } = {}
+): ProjectListEntry[] {
+  const active = activeFilter(db);
+  const passive = passiveFilter(db);
+  const where: string[] = ["e.project IS NOT NULL", "e.project != ''"];
+  const params: (string | number)[] = [];
+  if (opts.search) {
+    where.push("(LOWER(e.project) LIKE ? OR LOWER(e.app_name) LIKE ?)");
+    const term = `%${opts.search.toLowerCase()}%`;
+    params.push(term, term);
+  }
+  const baseWhere = where.join(" AND ");
+
+  const activeRows = db
+    .prepare(
+      `SELECT e.app_name AS app, e.project AS project,
+              ${SECONDS_EXPR} AS seconds,
+              MIN(e.timestamp) AS firstSeen,
+              MAX(e.timestamp) AS lastSeen,
+              COUNT(DISTINCT DATE(e.timestamp, 'localtime')) AS daysActive
+         FROM entries e
+        WHERE ${baseWhere}${active}
+        GROUP BY e.app_name, e.project`
+    )
+    .all(...params) as Array<{
+    app: string; project: string; seconds: number;
+    firstSeen: string; lastSeen: string; daysActive: number;
+  }>;
+  const passiveRows = db
+    .prepare(
+      `SELECT e.app_name AS app, e.project AS project, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${baseWhere}${passive}
+        GROUP BY e.app_name, e.project`
+    )
+    .all(...params) as Array<{ app: string; project: string; seconds: number }>;
+
+  const displayNames = loadDisplayNames(db);
+  const map = new Map<string, ProjectListEntry>();
+  const k = (a: string, p: string) => `${a}\0${p}`;
+  for (const r of activeRows) {
+    map.set(k(r.app, r.project), {
+      app: r.app, displayName: displayNames.get(r.app) ?? null,
+      project: r.project, totalSeconds: r.seconds, passiveSeconds: 0,
+      daysActive: r.daysActive, firstSeen: r.firstSeen, lastSeen: r.lastSeen,
+    });
+  }
+  for (const r of passiveRows) {
+    const existing = map.get(k(r.app, r.project));
+    if (existing) existing.passiveSeconds = r.seconds;
+    // Skip passive-only projects from activeRows-derived metadata: they'd
+    // have no firstSeen/daysActive so they're not as useful to surface here.
+  }
+  const out = [...map.values()].sort((a, b) =>
+    (b.totalSeconds + b.passiveSeconds) - (a.totalSeconds + a.passiveSeconds));
+  return out.slice(0, Math.min(Math.max(opts.limit ?? 200, 1), 5000));
+}
+
+// ── get_calendar ──────────────────────────────────────────────────────────
+
+export interface CalendarDay {
+  date: string;
+  seconds: number;
+  passiveSeconds: number;
+}
+
+export interface CalendarResult extends Range {
+  totalSeconds: number;
+  totalPassiveSeconds: number;
+  /** Dense per-day series including zero-second days for streak math. */
+  days: CalendarDay[];
+}
+
+/**
+ * GitHub-contribution-grid-style daily totals. Default period is `year` for
+ * the full annual heatmap; pass any other period for narrower windows.
+ * Days with zero activity are explicitly included so streak / gap analysis
+ * doesn't have to inflate the result.
+ */
+export function getCalendar(db: Database.Database, period = "year"): CalendarResult {
+  const range = parsePeriod(period);
+  const ignored = getIgnoredApps(db);
+  const { clause: iC, params: iP } = ignoredAppsClause(ignored);
+  const active = activeFilter(db);
+  const passive = passiveFilter(db);
+  const baseWhere = `e.timestamp >= ? AND e.timestamp < ?${iC}`;
+  const baseParams = [range.start, range.end, ...iP];
+
+  const activeRows = db
+    .prepare(
+      `SELECT DATE(e.timestamp, 'localtime') AS date, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${baseWhere}${active}
+        GROUP BY DATE(e.timestamp, 'localtime')`
+    )
+    .all(...baseParams) as Array<{ date: string; seconds: number }>;
+  const passiveRows = db
+    .prepare(
+      `SELECT DATE(e.timestamp, 'localtime') AS date, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${baseWhere}${passive}
+        GROUP BY DATE(e.timestamp, 'localtime')`
+    )
+    .all(...baseParams) as Array<{ date: string; seconds: number }>;
+
+  const activeMap = new Map(activeRows.map((r) => [r.date, r.seconds]));
+  const passiveMap = new Map(passiveRows.map((r) => [r.date, r.seconds]));
+
+  // Densify: walk the local-date range from start..end (exclusive end).
+  const days: CalendarDay[] = [];
+  const startLocal = new Date(range.start);
+  const endLocal = new Date(range.end);
+  const cursor = new Date(startLocal.getFullYear(), startLocal.getMonth(), startLocal.getDate());
+  let totalActive = 0;
+  let totalPassive = 0;
+  while (cursor < endLocal) {
+    const y = cursor.getFullYear();
+    const m = String(cursor.getMonth() + 1).padStart(2, "0");
+    const d = String(cursor.getDate()).padStart(2, "0");
+    const key = `${y}-${m}-${d}`;
+    const a = activeMap.get(key) ?? 0;
+    const p = passiveMap.get(key) ?? 0;
+    days.push({ date: key, seconds: a, passiveSeconds: p });
+    totalActive += a;
+    totalPassive += p;
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return {
+    ...range,
+    totalSeconds: totalActive,
+    totalPassiveSeconds: totalPassive,
+    days,
+  };
+}
+
+// ── get_device_breakdown ──────────────────────────────────────────────────
+
+export interface DeviceTotal {
+  deviceId: string;
+  isCurrent: boolean;
+  /** Most-frequent platform string seen on this device (e.g. "macos", "windows"). */
+  platform: string | null;
+  totalSeconds: number;
+  passiveSeconds: number;
+  daysActive: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+export interface DeviceBreakdownResult extends Range {
+  totalSeconds: number;
+  devices: DeviceTotal[];
+}
+
+export function getDeviceBreakdown(
+  db: Database.Database,
+  period = "month",
+): DeviceBreakdownResult {
+  const range = parsePeriod(period);
+  const cols = db.prepare(`PRAGMA table_info(entries)`).all() as Array<{ name: string }>;
+  const hasDevice = cols.some((c) => c.name === "device_id");
+  const hasPlatform = cols.some((c) => c.name === "platform");
+  if (!hasDevice) {
+    // Single-device DBs that pre-date the device_id migration have nothing
+    // meaningful to break out — return a synthetic "this device" total.
+    const total = db
+      .prepare(
+        `SELECT ${SECONDS_EXPR} AS seconds FROM entries e
+           WHERE e.timestamp >= ? AND e.timestamp < ?${activeFilter(db)}`
+      )
+      .get(range.start, range.end) as { seconds: number | null };
+    return { ...range, totalSeconds: total.seconds ?? 0, devices: [] };
+  }
+  const active = activeFilter(db);
+  const passive = passiveFilter(db);
+  const where = `e.timestamp >= ? AND e.timestamp < ? AND e.device_id IS NOT NULL`;
+  const params = [range.start, range.end];
+
+  const activeRows = db
+    .prepare(
+      `SELECT e.device_id AS deviceId, ${SECONDS_EXPR} AS seconds,
+              MIN(e.timestamp) AS firstSeen, MAX(e.timestamp) AS lastSeen,
+              COUNT(DISTINCT DATE(e.timestamp, 'localtime')) AS daysActive
+         FROM entries e
+        WHERE ${where}${active}
+        GROUP BY e.device_id`
+    )
+    .all(...params) as Array<{
+    deviceId: string; seconds: number;
+    firstSeen: string; lastSeen: string; daysActive: number;
+  }>;
+  const passiveRows = db
+    .prepare(
+      `SELECT e.device_id AS deviceId, ${SECONDS_EXPR} AS seconds
+         FROM entries e
+        WHERE ${where}${passive}
+        GROUP BY e.device_id`
+    )
+    .all(...params) as Array<{ deviceId: string; seconds: number }>;
+
+  // Most-frequent platform per device gives the LLM something to label
+  // each device with — "macos" / "windows" / "browser-extension".
+  const platformByDevice = new Map<string, string>();
+  if (hasPlatform) {
+    const platRows = db
+      .prepare(
+        `SELECT e.device_id AS deviceId, e.platform, COUNT(*) AS cnt
+           FROM entries e
+          WHERE ${where} AND e.platform IS NOT NULL
+          GROUP BY e.device_id, e.platform`
+      )
+      .all(...params) as Array<{ deviceId: string; platform: string; cnt: number }>;
+    const winners = new Map<string, number>();
+    for (const r of platRows) {
+      const cur = winners.get(r.deviceId) ?? -1;
+      if (r.cnt > cur) {
+        winners.set(r.deviceId, r.cnt);
+        platformByDevice.set(r.deviceId, r.platform);
+      }
+    }
+  }
+
+  // Identify the local device id from sync_state so the LLM can mark it.
+  let currentDeviceId: string | null = null;
+  try {
+    const row = db
+      .prepare(`SELECT value FROM sync_state WHERE key = 'device_id'`)
+      .get() as { value: string } | undefined;
+    currentDeviceId = row?.value ?? null;
+  } catch { /* sync_state may not exist on very old DBs */ }
+
+  const passiveMap = new Map(passiveRows.map((r) => [r.deviceId, r.seconds]));
+  const devices: DeviceTotal[] = activeRows.map((r) => ({
+    deviceId: r.deviceId,
+    isCurrent: r.deviceId === currentDeviceId,
+    platform: platformByDevice.get(r.deviceId) ?? null,
+    totalSeconds: r.seconds,
+    passiveSeconds: passiveMap.get(r.deviceId) ?? 0,
+    daysActive: r.daysActive,
+    firstSeen: r.firstSeen,
+    lastSeen: r.lastSeen,
+  }));
+  devices.sort((a, b) => b.totalSeconds - a.totalSeconds);
+
+  const totalSeconds = devices.reduce((acc, d) => acc + d.totalSeconds, 0);
+  return { ...range, totalSeconds, devices };
+}

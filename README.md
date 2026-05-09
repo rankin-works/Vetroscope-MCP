@@ -6,15 +6,39 @@ Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip,
 
 ## Tools
 
+**Reports & breakdowns**
+
 | Tool | What it does |
 |------|--------------|
-| `get_report` | Aggregate report for a period — total active seconds, top apps, top projects with sub-projects nested (YouTube videos, SoundCloud songs, Netflix episodes). Mirrors the desktop dashboard. |
+| `get_report` | Aggregate report for a period — total active seconds, top apps, top projects with sub-projects nested (YouTube videos, SoundCloud songs, Netflix episodes). |
 | `get_app_breakdown` | Per-project breakdown for a single app over a period, with sub-projects. |
-| `get_app_stats` | Deep stats for one app: lifetime totals, days active, daily series, hour-of-day distribution, weekday distribution, top projects. |
-| `list_tags` | Quick reference of all your tags (id, name, color, sticky flag). |
+| `get_app_stats` | Deep stats for one app: lifetime totals, days active, daily series, hour-of-day distribution, weekday distribution. |
 | `get_tag_breakdown` | Time-spent report for a single tag — top apps, top projects, daily series, active/passive split. |
-| `get_goals_progress` | Current progress on your configured app / overall / tag goals. |
-| `query_entries` | Filtered list of raw tracking entries (app, project, tag, search, period). |
+| `get_calendar` | Dense per-day series (heatmap data) for any period — defaults to a full year. |
+| `get_device_breakdown` | Per-device totals when you run Vetroscope across multiple machines. |
+
+**Reference / lookup**
+
+| Tool | What it does |
+|------|--------------|
+| `list_tags` | All your tags with id, name, color, sticky flag. |
+| `list_projects` | Every (app, project) pair ever tracked with all-time totals + first/last seen + optional substring search. |
+| `list_markers` | Your timeline markers (timestamp, label, color, icon, optional region end). |
+
+**Activity / status**
+
+| Tool | What it does |
+|------|--------------|
+| `get_sessions` | Continuous activity blocks (start/end/duration) — the natural grain for "what did I work on this morning". |
+| `get_current_status` | Most recent entry — what app/project right now, how recently, tracking vs idle. |
+| `query_entries` | Filtered list of raw 30s entries (app / project / tag / search / period / mode). |
+
+**Goals**
+
+| Tool | What it does |
+|------|--------------|
+| `get_goals_progress` | Current progress on configured app / overall / tag goals. |
+| `get_goal_achievements` | Historical record of which goals you hit on which days — drives streak questions. |
 
 All time-aware tools accept these shared filters:
 
@@ -111,6 +135,13 @@ You can override either piece with environment variables:
 - *"When during the day do I usually use Cursor?"*
 - *"How many hours of focused work did I do during weekday working hours (9–5) last week?"*
 - *"Which YouTube videos did I watch yesterday and how long?"*
+- *"What am I doing right now?"*
+- *"Show me my longest focused work sessions today."*
+- *"How many days in a row have I hit my coding goal?"*
+- *"What was happening during my 'Eye appointment' marker on Wednesday?"*
+- *"Have I ever worked on a project called 'Atlas'?"*
+- *"What was my busiest day this year?"*
+- *"How much of my coding time was on my Mac vs Windows this month?"*
 
 ## Local development
 
