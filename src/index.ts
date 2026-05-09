@@ -82,12 +82,15 @@ server.registerTool(
   {
     title: "Query raw entries",
     description:
-      "Filtered list of raw tracking entries. Useful for digging into specific projects or finding what window titles appeared. Returns at most 5000 rows; default 200.",
+      "Filtered list of raw tracking entries. Useful for digging into specific projects or finding what window titles appeared. Defaults to active foreground entries only — pass mode='passive' or 'all' to include away-listening (background music while idle). Returns at most 5000 rows; default 200.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).optional(),
       app: z.string().optional().describe("Restrict to a single app name"),
       project: z.string().optional().describe("Restrict to a single project (exact match)"),
       search: z.string().optional().describe("Substring match against window title, project, or sub-project"),
+      mode: z
+        .enum(["active", "passive", "all"]).optional()
+        .describe("active = foreground only (default), passive = away-listening only, all = both"),
       limit: z.number().int().min(1).max(5000).optional(),
     },
   },
