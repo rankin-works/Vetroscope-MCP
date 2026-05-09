@@ -1,6 +1,6 @@
 # Vetroscope MCP
 
-A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for [Vetroscope](https://rankin.works) — gives LLMs (Claude Desktop, Claude Code, ChatGPT, Cursor, …) context on how you've been spending your time, what projects you've been in, and how you're tracking against your goals.
+A read-only [Model Context Protocol](https://modelcontextprotocol.io) server for [Vetroscope](https://vetroscope.com) — gives LLMs (Claude Desktop, Claude Code, ChatGPT, Cursor, …) context on how you've been spending your time, what projects you've been in, and how you're tracking against your goals.
 
 Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip, no auth, works offline.
 
