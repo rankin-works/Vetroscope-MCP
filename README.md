@@ -53,7 +53,7 @@ Every total is split into **active** foreground time and **passive** away-listen
 
 ## Requirements
 
-- [Vetroscope](https://rankin.works) installed and run at least once.
+- [Vetroscope](https://vetroscope.com) installed and run at least once.
 - Node.js 18+.
 
 ## Install
