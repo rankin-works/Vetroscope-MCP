@@ -167,4 +167,4 @@ Because it reads the schema directly, a Vetroscope schema migration could break 
 
 ## License
 
-MIT © Jake Rankin
+MIT © Jacob Rankin
