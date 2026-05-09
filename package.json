@@ -1,6 +1,6 @@
 {
   "name": "vetroscope-mcp",
-  "version": "0.6.1",
+  "version": "1.0.0",
   "description": "Read-only Model Context Protocol server for Vetroscope — gives LLMs context on your tracked time, projects, and goals from your local Vetroscope SQLite database.",
   "license": "MIT",
   "author": "Jacob Rankin <jake@vetroscope.com> (https://rankin.works)",
@@ -31,6 +31,7 @@
     "dist",
     "assets",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {

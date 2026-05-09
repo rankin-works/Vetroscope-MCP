@@ -79,7 +79,7 @@ const SERVER_ICONS = [
 
 const server = new McpServer({
   name: "vetroscope-mcp",
-  version: "0.6.1",
+  version: "1.0.0",
   title: "Vetroscope",
   description:
     "Read-only access to your local Vetroscope time-tracking database — apps, projects, goals, and individual sessions.",
@@ -430,8 +430,8 @@ server.registerTool(
       "Top tracks and top artists across native music apps and browser music sites for the period, plus per-day listening minutes. Tracks come from entries.sub_project (e.g. 'Fox Stevenson — Tryhard'); artists are parsed from the 'Artist — Title' convention. Same music classifier as get_music_split — override via music_apps / music_browser_projects to e.g. include YouTube as music for this query.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).default("week"),
-      top_tracks: z.number().int().min(1).max(500).optional().describe("Max tracks returned (default 50)"),
-      top_artists: z.number().int().min(1).max(200).optional().describe("Max artists returned (default 25)"),
+      top_tracks: z.number().int().min(0).max(500).optional().describe("Max tracks returned (default 50, 0 to omit)"),
+      top_artists: z.number().int().min(0).max(200).optional().describe("Max artists returned (default 25, 0 to omit)"),
       music_apps: z.array(z.string()).optional()
         .describe(`Override the native music app list. Default: ${JSON.stringify(DEFAULT_MUSIC_APPS)}`),
       music_browser_projects: z.array(z.string()).optional()

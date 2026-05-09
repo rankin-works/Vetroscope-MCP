@@ -175,6 +175,34 @@ The server is a thin query adapter over the same SQLite database that Vetroscope
 
 Because it reads the schema directly, a Vetroscope schema migration could break the MCP. The set of tools is intentionally narrow — purpose-built rather than a generic SQL surface — so changes localize to `src/queries.ts`.
 
+## Stability guarantees
+
+Starting with **1.0.0**, vetroscope-mcp follows [Semantic Versioning](https://semver.org). The public API surface — tool names, parameter names, parameter semantics, and response field names — is stable and changes follow these rules:
+
+| Change | SemVer bump |
+|--------|-------------|
+| Adding a new tool | minor (1.x.0) |
+| Adding a new optional argument to an existing tool | minor |
+| Adding a new field to an existing response | minor |
+| Renaming a tool, argument, or response field | **major** (2.0.0) |
+| Changing a parameter's accepted values or default | **major** |
+| Changing the meaning of an existing field (e.g. seconds → minutes) | **major** |
+| Removing a tool, argument, or response field | **major** |
+| Tightening validation in a way that breaks previously valid input | **major** |
+
+Bug fixes and internal refactors that don't change the API surface are patch bumps (1.0.x).
+
+Things explicitly **not** under the SemVer contract:
+
+- Internal helpers and types not exported from the npm package
+- The set of canonical app names in `src/categories.ts` (the `categorizeApp` function may classify the same app differently between minor versions as Vetroscope adds apps)
+- The exact wording of tool descriptions
+- Error message text
+
+If you build something on top of vetroscope-mcp and want to lock to a major version, pin to `^1.0.0` in your dependency.
+
+See [CHANGELOG.md](./CHANGELOG.md) for the full release history.
+
 ## License
 
 MIT © Jacob Rankin
