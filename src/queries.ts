@@ -2572,6 +2572,23 @@ export function getFocusHeatmap(
 
 export type MediaLinkKind = "spotify_track" | "youtube_watch";
 
+/**
+ * Convert the captured URI to its HTTPS equivalent. Spotify track URIs
+ * (`spotify:track:<id>`) become the open.spotify.com web player form,
+ * which auto-redirects to the Spotify desktop app when it's installed.
+ * YouTube captures are already HTTPS so they pass through unchanged.
+ * The track-ID regex matches Spotify's canonical 22-char base62, but
+ * we accept anything `[A-Za-z0-9]{16,32}` to match the desktop
+ * capture-side canonicalizer's tolerance.
+ */
+function deriveMediaWebUrl(url: string, kind: MediaLinkKind): string {
+  if (kind === "spotify_track") {
+    const m = /^spotify:track:([A-Za-z0-9]{16,32})$/.exec(url);
+    if (m) return `https://open.spotify.com/track/${m[1]}`;
+  }
+  return url;
+}
+
 export interface MediaLinkResult {
   app: string;
   /** Custom app display name when the user has set one, else null. */
@@ -2583,7 +2600,25 @@ export interface MediaLinkResult {
    */
   project: string;
   subProject: string | null;
+  /**
+   * Canonical URI as captured by Vetroscope — `spotify:track:<id>` for
+   * Spotify, `https://www.youtube.com/watch?v=<id>` for YouTube. Works
+   * with `shell.openExternal()` / `open(1)` (the desktop app and your
+   * terminal will route the scheme correctly). Some web renderers
+   * filter custom schemes for security; use `webUrl` instead when you
+   * need a link that always survives clipboard / chat / browser
+   * round-trips.
+   */
   url: string;
+  /**
+   * HTTPS equivalent of `url` — always safe to render as a clickable
+   * link in any markdown renderer / web UI. For Spotify this is the
+   * `https://open.spotify.com/track/<id>` form (the Spotify web player
+   * page, which hands off to the desktop app via deep-link when it's
+   * installed). For YouTube this is the same as `url` since the
+   * captured form is already HTTPS.
+   */
+  webUrl: string;
   kind: MediaLinkKind;
   /** Total foreground time the user spent on this media within the period. */
   totalSeconds: number;
@@ -2718,6 +2753,7 @@ export function getMediaLinks(
       project: r.project,
       subProject: r.subProject === "" ? null : r.subProject,
       url: r.url,
+      webUrl: deriveMediaWebUrl(r.url, r.kind as MediaLinkKind),
       kind: r.kind as MediaLinkKind,
       totalSeconds: r.activeSeconds,
       passiveSeconds: r.passiveSeconds,

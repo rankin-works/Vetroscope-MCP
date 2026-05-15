@@ -80,7 +80,7 @@ const SERVER_ICONS = [
 
 const server = new McpServer({
   name: "vetroscope-mcp",
-  version: "1.1.0",
+  version: "1.2.0",
   title: "Vetroscope",
   description:
     "Read-only access to your local Vetroscope time-tracking database — apps, projects, goals, and individual sessions.",
@@ -459,7 +459,7 @@ server.registerTool(
   {
     title: "Get captured media URLs (Spotify tracks, YouTube videos)",
     description:
-      "Lists canonical deep-links Vetroscope captured for media the user actually played — Spotify `spotify:track:…` URIs and YouTube `https://www.youtube.com/watch?v=…` URLs. Each row carries the matching time data so you can answer 'what YouTube videos did I rewatch this week + give me the link to the top one?' or 'send me a Spotify URI for the song I played the most yesterday'. Requires Vetroscope ≥ 0.2.30 with the `capture_media_links` setting enabled — `available: false` is returned on older installs or when nothing has been captured. With `period` set, the same dashboard filter stack as get_report applies and totals match Charts; without `period`, time columns are lifetime totals. URLs are filtered strictly at capture time (YouTube /watch only; track URIs only — no ads, no shorts, no channel pages) so anything returned here is safe to open directly.",
+      "Lists canonical deep-links Vetroscope captured for media the user actually played — Spotify `spotify:track:…` URIs and YouTube `https://www.youtube.com/watch?v=…` URLs. Each row carries the matching time data so you can answer 'what YouTube videos did I rewatch this week + give me the link to the top one?' or 'send me a Spotify URI for the song I played the most yesterday'. Each row also includes a `webUrl` HTTPS variant — `https://open.spotify.com/track/<id>` for Spotify (which hands off to the desktop app when installed), same as `url` for YouTube — so a clickable link survives any markdown / chat renderer that strips custom URI schemes. Requires Vetroscope ≥ 0.2.30 with the `capture_media_links` setting enabled — `available: false` is returned on older installs or when nothing has been captured. With `period` set, the same dashboard filter stack as get_report applies and totals match Charts; without `period`, time columns are lifetime totals. URLs are filtered strictly at capture time (YouTube /watch only; track URIs only — no ads, no shorts, no channel pages) so anything returned here is safe to open directly.",
     inputSchema: {
       kind: z.enum(["spotify_track", "youtube_watch"]).optional()
         .describe("Restrict to one kind. Omit to return both."),

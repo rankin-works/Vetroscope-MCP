@@ -2,6 +2,12 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.2.0 — 2026-05-15
+
+### Added
+
+- **`webUrl` field on `get_media_links` results.** Always an HTTPS URL — `https://open.spotify.com/track/<id>` for Spotify (which hands off to the Spotify desktop app via deep-link when installed) and the same as `url` for YouTube (already HTTPS). Use `webUrl` whenever the consumer's renderer might strip non-`http(s)` schemes (most chat / markdown renderers do this by default for security). `url` keeps the captured canonical URI — pass that to `shell.openExternal()` / `open(1)` when you want the OS handler chain.
+
 ## 1.1.0 — 2026-05-15
 
 ### Added
