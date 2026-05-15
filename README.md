@@ -19,6 +19,7 @@ Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip,
 | `get_music_split` | Music-vs-work analysis: work-with-music / music-only / heads-down-work / other, plus per-source (Spotify, SoundCloud, …) overlap totals. Classifier is overridable per call. |
 | `get_category_breakdown` | Time rolled up into broad categories: editor, browser, adobe, communication, gaming, productivity, creative, etc. Mirrors Vetroscope's internal app grouping. |
 | `get_listening_history` | Top tracks and top artists across native music apps and browser music sites, plus per-day listening minutes. Artists parsed from the "Artist — Title" sub_project convention. |
+| `get_media_links` | Canonical deep-links Vetroscope captured for media you actually played — Spotify `spotify:track:…` URIs and YouTube `youtube.com/watch?v=…` URLs — joined with the matching time data. Requires Vetroscope ≥ 0.2.30 with `capture_media_links` enabled. |
 | `get_focus_heatmap` | 7×24 grid of active foreground seconds — when do you usually do specific kinds of work. Optional app / project / tag filter to narrow to a single activity. |
 
 **Reference / lookup**

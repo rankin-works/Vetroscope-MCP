@@ -25,6 +25,7 @@ import {
   getCategoryBreakdown,
   getListeningHistory,
   getFocusHeatmap,
+  getMediaLinks,
   DEFAULT_MUSIC_APPS,
   DEFAULT_MUSIC_BROWSER_PROJECTS,
   type TimeFilters,
@@ -79,7 +80,7 @@ const SERVER_ICONS = [
 
 const server = new McpServer({
   name: "vetroscope-mcp",
-  version: "1.0.1",
+  version: "1.1.0",
   title: "Vetroscope",
   description:
     "Read-only access to your local Vetroscope time-tracking database — apps, projects, goals, and individual sessions.",
@@ -448,6 +449,36 @@ server.registerTool(
       topArtists: args.top_artists,
       musicApps: args.music_apps,
       musicBrowserProjects: args.music_browser_projects,
+      timeFilters: pickTimeFilters(args),
+      device: args.device,
+    }))
+);
+
+server.registerTool(
+  "get_media_links",
+  {
+    title: "Get captured media URLs (Spotify tracks, YouTube videos)",
+    description:
+      "Lists canonical deep-links Vetroscope captured for media the user actually played — Spotify `spotify:track:…` URIs and YouTube `https://www.youtube.com/watch?v=…` URLs. Each row carries the matching time data so you can answer 'what YouTube videos did I rewatch this week + give me the link to the top one?' or 'send me a Spotify URI for the song I played the most yesterday'. Requires Vetroscope ≥ 0.2.30 with the `capture_media_links` setting enabled — `available: false` is returned on older installs or when nothing has been captured. With `period` set, the same dashboard filter stack as get_report applies and totals match Charts; without `period`, time columns are lifetime totals. URLs are filtered strictly at capture time (YouTube /watch only; track URIs only — no ads, no shorts, no channel pages) so anything returned here is safe to open directly.",
+    inputSchema: {
+      kind: z.enum(["spotify_track", "youtube_watch"]).optional()
+        .describe("Restrict to one kind. Omit to return both."),
+      period: z.string().describe(PERIOD_DESCRIPTION + ". Omit for lifetime totals.").optional(),
+      search: z.string().optional()
+        .describe("Case-insensitive substring match against project, sub-project, or app name. Useful for 'find the Beyoncé track' style lookups."),
+      limit: z.number().int().min(1).max(500).optional().describe("Max links returned (default 100). Sorted by total time within the period desc."),
+      hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),
+      hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
+      weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
+      device: z.string().optional().describe(DEVICE_DESC),
+    },
+  },
+  async (args) =>
+    asJson(getMediaLinks(db(), {
+      kind: args.kind,
+      period: args.period,
+      search: args.search,
+      limit: args.limit,
       timeFilters: pickTimeFilters(args),
       device: args.device,
     }))

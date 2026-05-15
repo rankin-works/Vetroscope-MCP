@@ -2,6 +2,17 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.1.0 — 2026-05-15
+
+### Added
+
+- **New tool: `get_media_links`.** Lists canonical deep-links Vetroscope captured for media the user actually played — Spotify `spotify:track:…` URIs and YouTube `https://www.youtube.com/watch?v=…` URLs — joined with the matching time data. Supports the same `period` / `device` / `hour` / `weekday` filters as `get_report`, plus `kind` (`spotify_track` | `youtube_watch`) and a case-insensitive `search` for fuzzy "find the Beyoncé track" lookups. With `period` set, time totals use the same dashboard filter stack so they match Charts; without `period`, time columns are lifetime totals. Returns `available: false` on installs that predate the feature.
+- **`url` field on `SubProjectTotal`.** `get_report` and `get_app_breakdown` now surface the captured YouTube watch URL alongside each nested sub-project row when one exists. Null when the user hasn't enabled `capture_media_links`, the sub-project is from a non-supported source, or the install predates the feature.
+
+### Requirements
+
+- The new tool and the `url` field require **Vetroscope ≥ 0.2.30** with the `capture_media_links` setting enabled. URLs are filtered strictly at capture time on the desktop side (YouTube `/watch` only, with the video ID validated to 11 chars; Spotify track URIs only — no ads, no shorts, no channel pages, no tracking params), so anything returned here is safe to open directly.
+
 ## 1.0.1 — 2026-05-09
 
 ### Fixed

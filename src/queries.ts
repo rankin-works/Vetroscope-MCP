@@ -67,6 +67,22 @@ function hasSubProjectColumn(db: Database.Database): boolean {
   return has;
 }
 
+// media_links table arrived in Vetroscope 0.2.30 — users on older
+// installs won't have it. Feature-detect once per DB handle so the
+// MCP keeps working against any version (the tools just return null
+// urls / empty results when the table is missing).
+let _hasMediaLinksTable: WeakMap<Database.Database, boolean> = new WeakMap();
+function hasMediaLinksTable(db: Database.Database): boolean {
+  const cached = _hasMediaLinksTable.get(db);
+  if (cached !== undefined) return cached;
+  const rows = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='media_links'`)
+    .all() as Array<{ name: string }>;
+  const has = rows.length > 0;
+  _hasMediaLinksTable.set(db, has);
+  return has;
+}
+
 let _hasAppOverridesTable: WeakMap<Database.Database, boolean> = new WeakMap();
 function hasAppOverridesTable(db: Database.Database): boolean {
   const cached = _hasAppOverridesTable.get(db);
@@ -365,6 +381,14 @@ export interface SubProjectTotal {
   seconds: number;
   /** Background away-listening seconds (e.g. video kept playing while idle). */
   passiveSeconds: number;
+  /**
+   * Canonical deep-link captured by Vetroscope ≥ 0.2.30 when the user
+   * opted into `capture_media_links`. `https://www.youtube.com/watch?v=…`
+   * for YouTube watch pages; null when the user hasn't enabled capture,
+   * the sub-project is from a non-supported source, or the install
+   * predates the feature.
+   */
+  url: string | null;
 }
 
 export interface ProjectTotal {
@@ -583,13 +607,37 @@ function attachSubProjects(
   for (const r of activeSubs) {
     ensure(r.app, r.project).set(r.subProject, {
       subProject: r.subProject, seconds: r.seconds, passiveSeconds: 0,
+      url: null,
     });
   }
   for (const r of passiveSubs) {
     const inner = ensure(r.app, r.project);
     const existing = inner.get(r.subProject);
     if (existing) existing.passiveSeconds = r.seconds;
-    else inner.set(r.subProject, { subProject: r.subProject, seconds: 0, passiveSeconds: r.seconds });
+    else inner.set(r.subProject, { subProject: r.subProject, seconds: 0, passiveSeconds: r.seconds, url: null });
+  }
+
+  // Hydrate the canonical deep-link from media_links when the user
+  // has captured any. One bulk SELECT scoped to the (app, project)
+  // pairs we care about; per-row Map lookup keeps the hot loop O(1).
+  // Skipped entirely when the table doesn't exist on this install.
+  if (hasMediaLinksTable(db) && subMap.size > 0) {
+    const appProjPairs = [...subMap.keys()].map((k) => k.split("\0")) as Array<[string, string]>;
+    const orClauses = appProjPairs.map(() => "(app_name = ? AND project = ?)").join(" OR ");
+    const linkParams = appProjPairs.flat();
+    const linkRows = db
+      .prepare(
+        `SELECT app_name AS app, project, sub_project AS subProject, url
+           FROM media_links
+          WHERE ${orClauses}`
+      )
+      .all(...linkParams) as Array<{ app: string; project: string; subProject: string; url: string }>;
+    for (const r of linkRows) {
+      const inner = subMap.get(pkey(r.app, r.project));
+      if (!inner) continue;
+      const target = inner.get(r.subProject);
+      if (target) target.url = r.url;
+    }
   }
 
   for (const [projKey, project] of projMap) {
@@ -2518,4 +2566,173 @@ export function getFocusHeatmap(
   }
 
   return { ...range, cells, maxCellSeconds: max, totalSeconds: total };
+}
+
+// ── get_media_links ───────────────────────────────────────────────────────
+
+export type MediaLinkKind = "spotify_track" | "youtube_watch";
+
+export interface MediaLinkResult {
+  app: string;
+  /** Custom app display name when the user has set one, else null. */
+  displayName: string | null;
+  /**
+   * For Spotify the project IS the song ("Artist — Track") and
+   * `subProject` is null. For YouTube watch pages the project is the
+   * site label ("YouTube") and the video title lives in `subProject`.
+   */
+  project: string;
+  subProject: string | null;
+  url: string;
+  kind: MediaLinkKind;
+  /** Total foreground time the user spent on this media within the period. */
+  totalSeconds: number;
+  /** Background away-listening / muted-tab time within the period. */
+  passiveSeconds: number;
+  /** Distinct local-date days this media appeared on. */
+  daysActive: number;
+  /** ISO timestamp of the first capture (lifetime, not period-scoped). */
+  firstSeen: string;
+  /** ISO timestamp of the most recent observation (lifetime). */
+  lastSeen: string;
+}
+
+export interface MediaLinksResult {
+  /** Always present, even when the install predates the feature. */
+  available: boolean;
+  /** Total rows captured across all kinds, period-scoped to entries when set. */
+  totalRows: number;
+  links: MediaLinkResult[];
+}
+
+/**
+ * List captured media links (Spotify track URIs + YouTube /watch URLs)
+ * joined with entry-level time data. Requires Vetroscope ≥ 0.2.30 with
+ * `capture_media_links` turned on; returns `available: false` and an
+ * empty array on older installs or when nothing has been captured yet.
+ *
+ * Optional `period` scopes the joined time totals to a window — the
+ * same dashboard filter stack as get_report applies, so totals match
+ * Charts. Without `period` the time columns are lifetime totals across
+ * every entry the link's (app, project, sub_project) tuple has matched.
+ */
+export function getMediaLinks(
+  db: Database.Database,
+  opts: {
+    kind?: MediaLinkKind;
+    period?: string;
+    search?: string;
+    limit?: number;
+    device?: string;
+    timeFilters?: TimeFilters;
+  } = {}
+): MediaLinksResult {
+  if (!hasMediaLinksTable(db)) {
+    return { available: false, totalRows: 0, links: [] };
+  }
+
+  const where: string[] = [];
+  const params: (string | number)[] = [];
+  if (opts.kind) { where.push("ml.kind = ?"); params.push(opts.kind); }
+  if (opts.search) {
+    where.push("(LOWER(ml.project) LIKE ? OR LOWER(ml.sub_project) LIKE ? OR LOWER(ml.app_name) LIKE ?)");
+    const term = `%${opts.search.toLowerCase()}%`;
+    params.push(term, term, term);
+  }
+  const baseWhere = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+
+  // Period-scoped time join when requested. The same dashboard filter
+  // stack as the rest of the MCP applies; total seconds line up with
+  // get_report. Without a period we sum across every matching entry
+  // (lifetime), still honoring ignored apps / projects / patterns and
+  // optional device / hour / weekday filters.
+  const range = opts.period ? parsePeriod(opts.period) : null;
+  const dash = dashboardEntryClauseAndParams(db, "e", {
+    timeFilters: opts.timeFilters,
+    device: opts.device,
+  });
+  const dateClause = range ? "e.timestamp >= ? AND e.timestamp < ? AND " : "";
+  const dateParams = range ? [range.start, range.end] : [];
+  const active = activeFilter(db);
+  const passive = passiveFilter(db);
+
+  const linkRows = db
+    .prepare(
+      `SELECT ml.app_name AS app, ml.project AS project,
+              ml.sub_project AS subProject,
+              ml.url AS url, ml.kind AS kind,
+              ml.first_seen AS firstSeen, ml.last_seen AS lastSeen,
+              COALESCE(
+                (SELECT ${SECONDS_EXPR}
+                   FROM entries e
+                  WHERE ${dateClause}e.app_name = ml.app_name
+                    AND e.project = ml.project
+                    AND COALESCE(e.sub_project, '') = ml.sub_project${dash.clause}${active}
+                ), 0
+              ) AS activeSeconds,
+              COALESCE(
+                (SELECT ${SECONDS_EXPR}
+                   FROM entries e
+                  WHERE ${dateClause}e.app_name = ml.app_name
+                    AND e.project = ml.project
+                    AND COALESCE(e.sub_project, '') = ml.sub_project${dash.clause}${passive}
+                ), 0
+              ) AS passiveSeconds,
+              COALESCE(
+                (SELECT COUNT(DISTINCT DATE(e.timestamp, 'localtime'))
+                   FROM entries e
+                  WHERE ${dateClause}e.app_name = ml.app_name
+                    AND e.project = ml.project
+                    AND COALESCE(e.sub_project, '') = ml.sub_project${dash.clause}
+                ), 0
+              ) AS daysActive
+         FROM media_links ml
+         ${baseWhere}`
+    )
+    // The three correlated subqueries reuse the same date / device /
+    // hour params, so we splat them three times before the WHERE
+    // clause params.
+    .all(
+      ...dateParams, ...dash.params,
+      ...dateParams, ...dash.params,
+      ...dateParams, ...dash.params,
+      ...params,
+    ) as Array<{
+      app: string; project: string; subProject: string;
+      url: string; kind: string;
+      firstSeen: string; lastSeen: string;
+      activeSeconds: number; passiveSeconds: number; daysActive: number;
+    }>;
+
+  const displayNames = loadDisplayNames(db);
+
+  // Sort by total time within the period desc. Lifetime first/last
+  // seen stays in the response so callers can spot stale captures
+  // without re-querying.
+  const ranked = linkRows
+    .map<MediaLinkResult>((r) => ({
+      app: r.app,
+      displayName: displayNames.get(r.app) ?? null,
+      // Spotify stores the song as project with sub_project = ''.
+      // Normalize the empty-string sentinel back to null on the wire.
+      project: r.project,
+      subProject: r.subProject === "" ? null : r.subProject,
+      url: r.url,
+      kind: r.kind as MediaLinkKind,
+      totalSeconds: r.activeSeconds,
+      passiveSeconds: r.passiveSeconds,
+      daysActive: r.daysActive,
+      firstSeen: r.firstSeen,
+      lastSeen: r.lastSeen,
+    }))
+    .sort((a, b) =>
+      (b.totalSeconds + b.passiveSeconds) - (a.totalSeconds + a.passiveSeconds)
+    );
+
+  const limit = opts.limit ?? 100;
+  return {
+    available: true,
+    totalRows: ranked.length,
+    links: ranked.slice(0, limit),
+  };
 }
