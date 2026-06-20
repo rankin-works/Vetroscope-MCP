@@ -40,6 +40,7 @@ const HOUR_START_DESC = "Inclusive start hour 0-24 in local time. Combine with h
 const HOUR_END_DESC = "Exclusive end hour 0-24 in local time. Combine with hour_start.";
 const WEEKDAYS_DESC = "Restrict to specific weekdays. 0=Sunday, 1=Monday, …, 6=Saturday. Omit or pass [0,1,2,3,4,5,6] for no weekday filter.";
 const DEVICE_DESC = "Restrict to a single device. Pass 'current' (or 'this') for the local machine, a device UUID from get_device_breakdown, or a platform name like 'darwin', 'win32', 'browser-extension'. Omit or pass 'all' for no device filter.";
+const INCLUDE_DESCENDANTS_DESC = "Roll up the tag's whole subtree (the tag plus all of its nested child tags) instead of only its directly-assigned time. Use for a parent tag whose time lives in its children. Default false.";
 
 function pickTimeFilters(args: {
   hour_start?: number; hour_end?: number; weekdays?: number[];
@@ -218,7 +219,7 @@ server.registerTool(
   {
     title: "Get tag breakdown",
     description:
-      "Time-spent report for a single tag over a period: top apps and projects under the tag, daily series, active/passive split. Identify the tag by name (case-insensitive) — call list_tags first if you don't already know what's available.",
+      "Time-spent report for a single tag over a period: top apps and projects under the tag, daily series, active/passive split. Identify the tag by name (case-insensitive) — call list_tags first if you don't already know what's available. For a parent tag, set include_descendants to roll up the whole tag subtree.",
     inputSchema: {
       tag: z.string().describe("Tag name (case-insensitive). Numeric strings are treated as tag IDs."),
       period: z.string().describe(PERIOD_DESCRIPTION).default("week"),
@@ -228,6 +229,7 @@ server.registerTool(
       hour_end: z.number().int().min(0).max(24).optional().describe(HOUR_END_DESC),
       weekdays: z.array(z.number().int().min(0).max(6)).optional().describe(WEEKDAYS_DESC),
       device: z.string().optional().describe(DEVICE_DESC),
+      include_descendants: z.boolean().optional().describe(INCLUDE_DESCENDANTS_DESC),
     },
   },
   async (args) => {
@@ -238,6 +240,7 @@ server.registerTool(
       topProjects: args.top_projects,
       timeFilters: pickTimeFilters(args),
       device: args.device,
+      includeDescendants: args.include_descendants,
     });
     if (!result) {
       return {
@@ -254,16 +257,17 @@ server.registerTool(
   {
     title: "Get tag statistics",
     description:
-      "Deeper statistics for a single tag — the tag counterpart to get_app_stats. Lifetime totals (days active, first/last seen, average per active day), period totals, top apps under the tag, daily series, hour-of-day (24 buckets) and weekday (7 buckets) distributions, plus the tag's place in the hierarchy: its parent and its immediate children with rolled-up totals. The tag's own totals count directly-assigned time only; children are reported separately. Identify the tag by name (case-insensitive) or numeric id — call list_tags first if unsure.",
+      "Deeper statistics for a single tag — the tag counterpart to get_app_stats. Lifetime totals (days active, first/last seen, average per active day), period totals, top apps under the tag, daily series, hour-of-day (24 buckets) and weekday (7 buckets) distributions, plus the tag's place in the hierarchy: its parent and its immediate children with rolled-up totals. By default the tag's own totals count directly-assigned time only (children are reported separately); for a parent tag, set include_descendants to roll the whole subtree into the lifetime/period/hourOfDay/etc. series — the right way to ask 'how did I spend time under this parent tag, by hour?'. Identify the tag by name (case-insensitive) or numeric id — call list_tags first if unsure.",
     inputSchema: {
       tag: z.string().describe("Tag name (case-insensitive). Numeric strings are treated as tag IDs."),
       period: z.string().describe(PERIOD_DESCRIPTION + ". Defaults to 'week'.").default("week"),
       device: z.string().optional().describe(DEVICE_DESC),
+      include_descendants: z.boolean().optional().describe(INCLUDE_DESCENDANTS_DESC),
     },
   },
-  async ({ tag, period, device }) => {
+  async ({ tag, period, device, include_descendants }) => {
     const idMaybe = /^\d+$/.test(tag) ? Number(tag) : tag;
-    const result = getTagStats(db(), idMaybe, period, device);
+    const result = getTagStats(db(), idMaybe, period, device, include_descendants);
     if (!result) {
       return {
         content: [{ type: "text" as const, text: `No tag found matching "${tag}". Call list_tags to see available tags.` }],
@@ -517,18 +521,20 @@ server.registerTool(
   {
     title: "Get focus heatmap (hour × weekday grid)",
     description:
-      "Returns a dense 168-cell grid (7 weekdays × 24 hours) of active foreground seconds. Reveals when you usually do specific kinds of work — patterns the marginal hour-of-day and weekday distributions can't show. Optional app / project / tag filters narrow the heatmap to a single activity (e.g. 'when do I usually code in Cursor?'). Cells array is in (weekday, hour) order so cells[w*24 + h] indexes directly. 0=Sunday in weekday.",
+      "Returns a dense 168-cell grid (7 weekdays × 24 hours) of active foreground seconds. Reveals when you usually do specific kinds of work — patterns the marginal hour-of-day and weekday distributions can't show. Optional app / project / tag filters narrow the heatmap to a single activity (e.g. 'when do I usually code in Cursor?'); the tag is matched by name (case-insensitive) or id, and include_descendants rolls up a parent tag's whole subtree. Cells array is in (weekday, hour) order so cells[w*24 + h] indexes directly. 0=Sunday in weekday.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).default("month"),
       app: z.string().optional().describe("Restrict to a single app (canonical name)"),
       project: z.string().optional().describe("Restrict to a single project (exact match)"),
-      tag: z.string().optional().describe("Restrict to entries carrying a tag with this exact name"),
+      tag: z.string().optional().describe("Restrict to entries carrying this tag (name, case-insensitive, or numeric id)"),
       device: z.string().optional().describe(DEVICE_DESC),
+      include_descendants: z.boolean().optional().describe(INCLUDE_DESCENDANTS_DESC),
     },
   },
   async (args) =>
     asJson(getFocusHeatmap(db(), args.period, {
       app: args.app, project: args.project, tag: args.tag, device: args.device,
+      includeDescendants: args.include_descendants,
     }))
 );
 

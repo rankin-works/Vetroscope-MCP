@@ -1089,7 +1089,7 @@ export function getTagBreakdown(
   db: Database.Database,
   identifier: string | number,
   period: string,
-  opts: { topApps?: number; topProjects?: number; timeFilters?: TimeFilters; device?: string } = {}
+  opts: { topApps?: number; topProjects?: number; timeFilters?: TimeFilters; device?: string; includeDescendants?: boolean } = {}
 ): TagBreakdownResult | null {
   const tag = resolveTag(db, identifier);
   if (!tag) return null;
@@ -1098,8 +1098,10 @@ export function getTagBreakdown(
     timeFilters: opts.timeFilters,
     device: opts.device,
   });
-  const where = `e.timestamp >= ? AND e.timestamp < ? AND e.tag_id = ?${dash.clause}`;
-  const params = [range.start, range.end, tag.id, ...dash.params];
+  // Single tag id by default; the tag's whole subtree when include_descendants.
+  const tf = tagIdFilter(db, tag.id, opts.includeDescendants ?? false);
+  const where = `e.timestamp >= ? AND e.timestamp < ? AND ${tf.clause}${dash.clause}`;
+  const params = [range.start, range.end, ...tf.params, ...dash.params];
   const active = activeFilter(db);
   const passive = passiveFilter(db);
   const displayNames = loadDisplayNames(db);
@@ -1233,12 +1235,33 @@ function getDescendantTagIds(db: Database.Database, rootId: number): number[] {
   return out;
 }
 
+/** Build the entries tag-id filter for a resolved tag, optionally expanding to
+ *  the tag's whole subtree (self + all descendants). Returns a SQL clause and
+ *  its params for the given entries alias — a single `= ?` when not rolling
+ *  up, an `IN (…)` when a parent's branch is requested. */
+function tagIdFilter(
+  db: Database.Database,
+  tagId: number,
+  includeDescendants: boolean,
+  alias = "e",
+): { clause: string; params: number[] } {
+  const ids = includeDescendants ? [tagId, ...getDescendantTagIds(db, tagId)] : [tagId];
+  const clause = ids.length === 1
+    ? `${alias}.tag_id = ?`
+    : `${alias}.tag_id IN (${ids.map(() => "?").join(",")})`;
+  return { clause, params: ids };
+}
+
 export interface TagStatsResult {
   tag: TagInfo;
+  /** True when the totals below roll up the tag's whole subtree (self + all
+   *  descendants); false when they count only time directly assigned to this
+   *  tag. Set by the include_descendants option. */
+  includesDescendants: boolean;
   /**
-   * Lifetime totals for time DIRECTLY assigned to this tag (children are not
-   * rolled in — they're reported separately under `children`). Mirrors how
-   * the app's tag stats panel counts the tag's own time.
+   * Lifetime totals. By default this is time DIRECTLY assigned to the tag
+   * (children are reported separately under `children`); when
+   * includesDescendants is true it spans the tag and every descendant.
    */
   lifetime: {
     totalSeconds: number;
@@ -1273,12 +1296,18 @@ export interface TagStatsResult {
  * with rolled-up totals). Unlike get_app_stats this never returns null for a
  * tag that exists but has no direct time, so pure parent tags still report
  * their children. Returns null only when no tag matches `identifier`.
+ *
+ * With includeDescendants, the lifetime/period/topApps/daily/hourOfDay/weekday
+ * series roll up the tag's whole subtree — the natural way to ask "how did I
+ * spend time under this parent tag, by hour?" without summing children by hand.
+ * The `children` list still reports each immediate child's own subtree total.
  */
 export function getTagStats(
   db: Database.Database,
   identifier: string | number,
   period = "week",
   device?: string,
+  includeDescendants = false,
 ): TagStatsResult | null {
   const tag = resolveTag(db, identifier);
   if (!tag) return null;
@@ -1288,8 +1317,11 @@ export function getTagStats(
   const displayNames = loadDisplayNames(db);
   const dn = (app: string) => displayNames.get(app) ?? null;
   const dash = dashboardEntryClauseAndParams(db, "e", { device });
+  // Tag filter — a single id by default, or the tag's whole subtree when
+  // include_descendants is set. Threaded into every period/lifetime query.
+  const tf = tagIdFilter(db, tag.id, includeDescendants);
 
-  // Lifetime — direct-assigned time only (no period filter).
+  // Lifetime (no period filter).
   const lifetimeRow = db
     .prepare(
       `SELECT ${SECONDS_EXPR} AS seconds,
@@ -1297,15 +1329,15 @@ export function getTagStats(
               MAX(e.timestamp) AS lastSeen,
               COUNT(DISTINCT DATE(e.timestamp, 'localtime')) AS daysActive
          FROM entries e
-        WHERE e.tag_id = ?${dash.clause}${active}`
+        WHERE ${tf.clause}${dash.clause}${active}`
     )
-    .get(tag.id, ...dash.params) as { seconds: number | null; firstSeen: string | null; lastSeen: string | null; daysActive: number };
+    .get(...tf.params, ...dash.params) as { seconds: number | null; firstSeen: string | null; lastSeen: string | null; daysActive: number };
   const lifetimePassive = db
-    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE e.tag_id = ?${dash.clause}${passive}`)
-    .get(tag.id, ...dash.params) as { seconds: number | null };
+    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${tf.clause}${dash.clause}${passive}`)
+    .get(...tf.params, ...dash.params) as { seconds: number | null };
 
-  const periodWhere = `e.tag_id = ? AND e.timestamp >= ? AND e.timestamp < ?${dash.clause}`;
-  const periodParams = [tag.id, range.start, range.end, ...dash.params];
+  const periodWhere = `${tf.clause} AND e.timestamp >= ? AND e.timestamp < ?${dash.clause}`;
+  const periodParams = [...tf.params, range.start, range.end, ...dash.params];
 
   const periodActive = db
     .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${periodWhere}${active}`)
@@ -1370,6 +1402,7 @@ export function getTagStats(
   const lifeSeconds = lifetimeRow.seconds ?? 0;
   return {
     tag,
+    includesDescendants: includeDescendants,
     lifetime: {
       totalSeconds: lifeSeconds,
       passiveSeconds: lifetimePassive.seconds ?? 0,
@@ -2757,6 +2790,7 @@ export function getFocusHeatmap(
     project?: string;
     tag?: string;
     device?: string;
+    includeDescendants?: boolean;
   } = {}
 ): FocusHeatmapResult {
   const range = parsePeriod(period);
@@ -2769,10 +2803,20 @@ export function getFocusHeatmap(
   }
   if (opts.app) { where.push("e.app_name = ?"); params.push(opts.app); }
   if (opts.project) { where.push("e.project = ?"); params.push(opts.project); }
-  // Tag filter requires a JOIN — handled separately so we don't pay for it
-  // when the caller doesn't ask for it.
-  const joinTags = opts.tag ? "INNER JOIN tags t ON t.id = e.tag_id" : "";
-  if (opts.tag) { where.push("t.name = ?"); params.push(opts.tag); }
+  // Tag filter by id (entries carry tag_id directly, so no JOIN needed).
+  // Resolve the name/id first so we can optionally expand to the tag's whole
+  // subtree; an unknown tag forces an empty result rather than being ignored.
+  const joinTags = "";
+  if (opts.tag) {
+    const t = resolveTag(db, opts.tag);
+    if (!t) {
+      where.push("1 = 0");
+    } else {
+      const tf = tagIdFilter(db, t.id, opts.includeDescendants ?? false);
+      where.push(tf.clause);
+      params.push(...tf.params);
+    }
+  }
 
   const active = activeFilter(db);
   const rows = db

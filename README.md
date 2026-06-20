@@ -13,15 +13,15 @@ Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip,
 | `get_report` | Aggregate report for a period — total active seconds, top apps, top projects with sub-projects nested (YouTube videos, SoundCloud songs, Netflix episodes). |
 | `get_app_breakdown` | Per-project breakdown for a single app over a period, with sub-projects. |
 | `get_app_stats` | Deep stats for one app: lifetime totals, days active, daily series, hour-of-day distribution, weekday distribution. |
-| `get_tag_breakdown` | Time-spent report for a single tag — top apps, top projects, daily series, active/passive split. |
-| `get_tag_stats` | Deep stats for one tag (counterpart to `get_app_stats`): lifetime totals, days active, daily series, hour-of-day and weekday distributions, plus the tag's parent and its children with rolled-up totals. |
+| `get_tag_breakdown` | Time-spent report for a single tag — top apps, top projects, daily series, active/passive split. `include_descendants` rolls up a parent tag's subtree. |
+| `get_tag_stats` | Deep stats for one tag (counterpart to `get_app_stats`): lifetime totals, days active, daily series, hour-of-day and weekday distributions, plus the tag's parent and its children with rolled-up totals. Pass `include_descendants` to roll a parent tag's whole subtree into the series. |
 | `get_calendar` | Dense per-day series (heatmap data) for any period — defaults to a full year. |
 | `get_device_breakdown` | Per-device totals when you run Vetroscope across multiple machines. |
 | `get_music_split` | Music-vs-work analysis: work-with-music / music-only / heads-down-work / other, plus per-source (Spotify, SoundCloud, …) overlap totals. Classifier is overridable per call. |
 | `get_category_breakdown` | Time rolled up into broad categories: editor, browser, adobe, communication, gaming, productivity, creative, etc. Mirrors Vetroscope's internal app grouping. |
 | `get_listening_history` | Top tracks and top artists across native music apps and browser music sites, plus per-day listening minutes. Artists parsed from the "Artist — Title" sub_project convention. |
 | `get_media_links` | Canonical deep-links Vetroscope captured for media you actually played — Spotify `spotify:track:…` URIs and YouTube `youtube.com/watch?v=…` URLs — joined with the matching time data. Requires Vetroscope ≥ 0.2.30 with `capture_media_links` enabled. |
-| `get_focus_heatmap` | 7×24 grid of active foreground seconds — when do you usually do specific kinds of work. Optional app / project / tag filter to narrow to a single activity. |
+| `get_focus_heatmap` | 7×24 grid of active foreground seconds — when do you usually do specific kinds of work. Optional app / project / tag filter to narrow to a single activity; `include_descendants` rolls up a parent tag's subtree. |
 
 **Reference / lookup**
 

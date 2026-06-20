@@ -2,6 +2,16 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.4.0 — 2026-06-20
+
+### Added
+
+- **`include_descendants` option on `get_tag_stats`, `get_tag_breakdown`, and `get_focus_heatmap`.** Set it to roll a parent tag's whole subtree (the tag plus all of its nested children) into the result instead of counting only directly-assigned time. This is the right way to ask "how did I spend time under this parent tag, by hour/day?" — previously a parent tag (whose time lives in its children) returned almost nothing and you had to sum the descendants by hand. `get_tag_stats` also gains an `includesDescendants` boolean on the result so consumers know which mode produced the totals; its `children` list still reports each immediate child's own subtree total either way.
+
+### Changed
+
+- **`get_focus_heatmap` now matches its `tag` filter by name (case-insensitive) or numeric id**, consistent with `get_tag_breakdown` / `get_tag_stats`. Previously it required an exact, case-sensitive tag-name match. An unrecognized tag now yields an empty grid rather than being silently ignored.
+
 ## 1.3.0 — 2026-06-20
 
 ### Added
