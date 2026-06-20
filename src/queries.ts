@@ -987,22 +987,74 @@ export interface TagInfo {
    * when reasoning about why a tag shows up where it does.
    */
   sticky: boolean;
+  /** True when the tag is archived. Archived tags are hidden from list_tags
+   *  by default (matching the app), so this is only ever true when the
+   *  caller explicitly opts in via includeArchived. */
+  archived: boolean;
+  /** Immediate parent tag id when this tag is nested, else null. Vetroscope
+   *  supports a tag hierarchy (parent_id) the LLM should be aware of. */
+  parentId: number | null;
+  /** Parent tag's name, resolved for convenience. Null for root tags. */
+  parentName: string | null;
 }
 
-export function listTags(db: Database.Database): TagInfo[] {
+export function listTags(
+  db: Database.Database,
+  opts: { includeArchived?: boolean } = {},
+): TagInfo[] {
   // `deleted` is the soft-delete flag used by Vetroscope's sync layer; we
-  // never want to surface tombstoned tags. Older DBs may not have it.
+  // never want to surface tombstoned tags. `archived` is the user-facing
+  // hide flag — the app keeps archived tags out of every picker/list by
+  // default, so we mirror that unless the caller opts in. Older DBs may
+  // have neither column.
   const cols = db.prepare(`PRAGMA table_info(tags)`).all() as Array<{ name: string }>;
-  const hasDeleted = cols.some((c) => c.name === "deleted");
-  const hasSticky = cols.some((c) => c.name === "sticky");
-  const where = hasDeleted ? "WHERE deleted = 0" : "";
+  const has = (c: string) => cols.some((col) => col.name === c);
+  const hasDeleted = has("deleted");
+  const hasSticky = has("sticky");
+  const hasArchived = has("archived");
+  const hasParent = has("parent_id");
+
+  const conds: string[] = [];
+  if (hasDeleted) conds.push("deleted = 0");
+  if (hasArchived && !opts.includeArchived) conds.push("archived = 0");
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+
   const stickySelect = hasSticky ? "sticky" : "0 AS sticky";
+  const archivedSelect = hasArchived ? "archived" : "0 AS archived";
+  const parentSelect = hasParent ? "parent_id" : "NULL AS parent_id";
+
   const rows = db
     .prepare(
-      `SELECT id, name, color, ${stickySelect} FROM tags ${where} ORDER BY name COLLATE NOCASE`
+      `SELECT id, name, color, ${stickySelect}, ${archivedSelect}, ${parentSelect}
+         FROM tags ${where} ORDER BY name COLLATE NOCASE`
     )
-    .all() as Array<{ id: number; name: string; color: string; sticky: number }>;
-  return rows.map((r) => ({ id: r.id, name: r.name, color: r.color, sticky: r.sticky === 1 }));
+    .all() as Array<{ id: number; name: string; color: string; sticky: number; archived: number; parent_id: number | null }>;
+
+  // Resolve parent names. A child's parent may be archived (and thus absent
+  // from `rows` when includeArchived is false), so look up any missing
+  // parents directly rather than only mapping within the returned set.
+  const nameById = new Map<number, string>(rows.map((r) => [r.id, r.name]));
+  if (hasParent) {
+    const missing = [...new Set(
+      rows.map((r) => r.parent_id).filter((v): v is number => v != null && !nameById.has(v)),
+    )];
+    if (missing.length) {
+      const extra = db
+        .prepare(`SELECT id, name FROM tags WHERE id IN (${missing.map(() => "?").join(",")})`)
+        .all(...missing) as Array<{ id: number; name: string }>;
+      for (const e of extra) nameById.set(e.id, e.name);
+    }
+  }
+
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    color: r.color,
+    sticky: r.sticky === 1,
+    archived: r.archived === 1,
+    parentId: r.parent_id ?? null,
+    parentName: r.parent_id != null ? (nameById.get(r.parent_id) ?? null) : null,
+  }));
 }
 
 // ── get_tag_breakdown ─────────────────────────────────────────────────────
@@ -1021,9 +1073,11 @@ export interface TagBreakdownResult extends Range {
   daily: Array<{ date: string; seconds: number }>;
 }
 
-/** Resolve a tag by name (case-insensitive) or numeric id. Returns null if absent. */
+/** Resolve a tag by name (case-insensitive) or numeric id. Returns null if absent.
+ *  Includes archived tags so breakdown/stats still work on a tag the user has
+ *  since archived — list_tags hides them, but addressing one explicitly is fine. */
 function resolveTag(db: Database.Database, identifier: string | number): TagInfo | null {
-  const tags = listTags(db);
+  const tags = listTags(db, { includeArchived: true });
   if (typeof identifier === "number") {
     return tags.find((t) => t.id === identifier) ?? null;
   }
@@ -1147,6 +1201,190 @@ export function getTagBreakdown(
     apps,
     projects,
     daily: dailyRows,
+  };
+}
+
+// ── get_tag_stats ─────────────────────────────────────────────────────────
+
+/** Transitive child tag ids of `rootId` (excludes the root itself). Walks the
+ *  parent_id tree in memory. Returns [] on DBs without a tag hierarchy. */
+function getDescendantTagIds(db: Database.Database, rootId: number): number[] {
+  const cols = db.prepare(`PRAGMA table_info(tags)`).all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === "parent_id")) return [];
+  const hasDeleted = cols.some((c) => c.name === "deleted");
+  const rows = db
+    .prepare(`SELECT id, parent_id FROM tags ${hasDeleted ? "WHERE deleted = 0" : ""}`)
+    .all() as Array<{ id: number; parent_id: number | null }>;
+  const childrenOf = new Map<number, number[]>();
+  for (const r of rows) {
+    if (r.parent_id == null) continue;
+    const arr = childrenOf.get(r.parent_id) ?? [];
+    arr.push(r.id);
+    childrenOf.set(r.parent_id, arr);
+  }
+  const out: number[] = [];
+  const stack = [...(childrenOf.get(rootId) ?? [])];
+  while (stack.length) {
+    const id = stack.pop()!;
+    out.push(id);
+    const kids = childrenOf.get(id);
+    if (kids) stack.push(...kids);
+  }
+  return out;
+}
+
+export interface TagStatsResult {
+  tag: TagInfo;
+  /**
+   * Lifetime totals for time DIRECTLY assigned to this tag (children are not
+   * rolled in — they're reported separately under `children`). Mirrors how
+   * the app's tag stats panel counts the tag's own time.
+   */
+  lifetime: {
+    totalSeconds: number;
+    passiveSeconds: number;
+    daysActive: number;
+    firstSeen: string | null;
+    lastSeen: string | null;
+    avgSecondsPerActiveDay: number;
+  };
+  /** Period totals (matches the period argument). */
+  period: Range & { totalSeconds: number; passiveSeconds: number };
+  /** Apps this tag appears under within the period, active/passive split. */
+  topApps: AppTotal[];
+  /** Daily active seconds within the period. */
+  daily: Array<{ date: string; seconds: number }>;
+  /** 24-hour distribution of active seconds within the period. */
+  hourOfDay: Array<{ hour: number; seconds: number }>;
+  /** Day-of-week distribution within the period. 0=Sunday. */
+  weekday: Array<{ weekday: number; seconds: number }>;
+  /** Immediate parent tag when nested, else null. */
+  parent: { id: number; name: string; color: string } | null;
+  /** Immediate children, each with lifetime active seconds rolled up across
+   *  the child and all of ITS descendants — so the LLM can see how a parent
+   *  tag's branches divide up without re-querying. */
+  children: Array<{ id: number; name: string; color: string; totalSeconds: number }>;
+}
+
+/**
+ * Deeper statistics for a single tag — the tag counterpart to get_app_stats.
+ * Lifetime + period totals, top apps, daily / hour-of-day / weekday
+ * distributions, plus the tag's place in the hierarchy (parent + children
+ * with rolled-up totals). Unlike get_app_stats this never returns null for a
+ * tag that exists but has no direct time, so pure parent tags still report
+ * their children. Returns null only when no tag matches `identifier`.
+ */
+export function getTagStats(
+  db: Database.Database,
+  identifier: string | number,
+  period = "week",
+  device?: string,
+): TagStatsResult | null {
+  const tag = resolveTag(db, identifier);
+  if (!tag) return null;
+  const range = parsePeriod(period);
+  const active = activeFilter(db);
+  const passive = passiveFilter(db);
+  const displayNames = loadDisplayNames(db);
+  const dn = (app: string) => displayNames.get(app) ?? null;
+  const dash = dashboardEntryClauseAndParams(db, "e", { device });
+
+  // Lifetime — direct-assigned time only (no period filter).
+  const lifetimeRow = db
+    .prepare(
+      `SELECT ${SECONDS_EXPR} AS seconds,
+              MIN(e.timestamp) AS firstSeen,
+              MAX(e.timestamp) AS lastSeen,
+              COUNT(DISTINCT DATE(e.timestamp, 'localtime')) AS daysActive
+         FROM entries e
+        WHERE e.tag_id = ?${dash.clause}${active}`
+    )
+    .get(tag.id, ...dash.params) as { seconds: number | null; firstSeen: string | null; lastSeen: string | null; daysActive: number };
+  const lifetimePassive = db
+    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE e.tag_id = ?${dash.clause}${passive}`)
+    .get(tag.id, ...dash.params) as { seconds: number | null };
+
+  const periodWhere = `e.tag_id = ? AND e.timestamp >= ? AND e.timestamp < ?${dash.clause}`;
+  const periodParams = [tag.id, range.start, range.end, ...dash.params];
+
+  const periodActive = db
+    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${periodWhere}${active}`)
+    .get(...periodParams) as { seconds: number | null };
+  const periodPassive = db
+    .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${periodWhere}${passive}`)
+    .get(...periodParams) as { seconds: number | null };
+
+  // Apps under this tag within the period (active + passive merged).
+  const activeApps = db
+    .prepare(`SELECT e.app_name AS app, ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${periodWhere}${active} GROUP BY e.app_name`)
+    .all(...periodParams) as Array<{ app: string; seconds: number }>;
+  const passiveApps = db
+    .prepare(`SELECT e.app_name AS app, ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${periodWhere}${passive} GROUP BY e.app_name`)
+    .all(...periodParams) as Array<{ app: string; seconds: number }>;
+  const appMap = new Map<string, AppTotal>();
+  for (const r of activeApps) appMap.set(r.app, { app: r.app, displayName: dn(r.app), seconds: r.seconds, passiveSeconds: 0 });
+  for (const r of passiveApps) {
+    const existing = appMap.get(r.app);
+    if (existing) existing.passiveSeconds = r.seconds;
+    else appMap.set(r.app, { app: r.app, displayName: dn(r.app), seconds: 0, passiveSeconds: r.seconds });
+  }
+  const topApps = [...appMap.values()]
+    .sort((a, b) => (b.seconds + b.passiveSeconds) - (a.seconds + a.passiveSeconds));
+
+  const daily = db
+    .prepare(`SELECT DATE(e.timestamp, 'localtime') AS date, ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${periodWhere}${active} GROUP BY DATE(e.timestamp, 'localtime') ORDER BY date`)
+    .all(...periodParams) as Array<{ date: string; seconds: number }>;
+
+  const hourRows = db
+    .prepare(`SELECT CAST(strftime('%H', e.timestamp, 'localtime') AS INTEGER) AS hour, ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${periodWhere}${active} GROUP BY hour`)
+    .all(...periodParams) as Array<{ hour: number; seconds: number }>;
+  const hourMap = new Map<number, number>(hourRows.map((r) => [r.hour, r.seconds]));
+  const hourOfDay = Array.from({ length: 24 }, (_, h) => ({ hour: h, seconds: hourMap.get(h) ?? 0 }));
+
+  const weekdayRows = db
+    .prepare(`SELECT CAST(strftime('%w', e.timestamp, 'localtime') AS INTEGER) AS weekday, ${SECONDS_EXPR} AS seconds FROM entries e WHERE ${periodWhere}${active} GROUP BY weekday`)
+    .all(...periodParams) as Array<{ weekday: number; seconds: number }>;
+  const wdMap = new Map<number, number>(weekdayRows.map((r) => [r.weekday, r.seconds]));
+  const weekday = Array.from({ length: 7 }, (_, w) => ({ weekday: w, seconds: wdMap.get(w) ?? 0 }));
+
+  // Hierarchy. Parent comes off the resolved TagInfo; children are pulled
+  // fresh with their rolled-up lifetime active totals.
+  const parent = tag.parentId != null
+    ? (db.prepare(`SELECT id, name, color FROM tags WHERE id = ?`).get(tag.parentId) as { id: number; name: string; color: string } | undefined) ?? null
+    : null;
+
+  const hasParentCol = (db.prepare(`PRAGMA table_info(tags)`).all() as Array<{ name: string }>).some((c) => c.name === "parent_id");
+  const hasDeletedCol = (db.prepare(`PRAGMA table_info(tags)`).all() as Array<{ name: string }>).some((c) => c.name === "deleted");
+  const childRows = hasParentCol
+    ? db.prepare(`SELECT id, name, color FROM tags WHERE parent_id = ?${hasDeletedCol ? " AND deleted = 0" : ""} ORDER BY name COLLATE NOCASE`).all(tag.id) as Array<{ id: number; name: string; color: string }>
+    : [];
+  const children = childRows.map((c) => {
+    const branch = [c.id, ...getDescendantTagIds(db, c.id)];
+    const placeholders = branch.map(() => "?").join(",");
+    const row = db
+      .prepare(`SELECT ${SECONDS_EXPR} AS seconds FROM entries e WHERE e.tag_id IN (${placeholders})${dash.clause}${active}`)
+      .get(...branch, ...dash.params) as { seconds: number | null };
+    return { id: c.id, name: c.name, color: c.color, totalSeconds: row.seconds ?? 0 };
+  });
+
+  const lifeSeconds = lifetimeRow.seconds ?? 0;
+  return {
+    tag,
+    lifetime: {
+      totalSeconds: lifeSeconds,
+      passiveSeconds: lifetimePassive.seconds ?? 0,
+      daysActive: lifetimeRow.daysActive,
+      firstSeen: lifetimeRow.firstSeen,
+      lastSeen: lifetimeRow.lastSeen,
+      avgSecondsPerActiveDay: lifetimeRow.daysActive > 0 ? Math.round(lifeSeconds / lifetimeRow.daysActive) : 0,
+    },
+    period: { ...range, totalSeconds: periodActive.seconds ?? 0, passiveSeconds: periodPassive.seconds ?? 0 },
+    topApps,
+    daily,
+    hourOfDay,
+    weekday,
+    parent,
+    children,
   };
 }
 

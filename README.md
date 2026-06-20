@@ -14,6 +14,7 @@ Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip,
 | `get_app_breakdown` | Per-project breakdown for a single app over a period, with sub-projects. |
 | `get_app_stats` | Deep stats for one app: lifetime totals, days active, daily series, hour-of-day distribution, weekday distribution. |
 | `get_tag_breakdown` | Time-spent report for a single tag — top apps, top projects, daily series, active/passive split. |
+| `get_tag_stats` | Deep stats for one tag (counterpart to `get_app_stats`): lifetime totals, days active, daily series, hour-of-day and weekday distributions, plus the tag's parent and its children with rolled-up totals. |
 | `get_calendar` | Dense per-day series (heatmap data) for any period — defaults to a full year. |
 | `get_device_breakdown` | Per-device totals when you run Vetroscope across multiple machines. |
 | `get_music_split` | Music-vs-work analysis: work-with-music / music-only / heads-down-work / other, plus per-source (Spotify, SoundCloud, …) overlap totals. Classifier is overridable per call. |
@@ -26,7 +27,7 @@ Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip,
 
 | Tool | What it does |
 |------|--------------|
-| `list_tags` | All your tags with id, name, color, sticky flag. |
+| `list_tags` | Your tags with id, name, color, sticky flag, archived flag, and parentId/parentName for nested tags. Archived tags hidden by default (`include_archived` to show). |
 | `list_projects` | Every (app, project) pair ever tracked with all-time totals + first/last seen + optional substring search. |
 | `list_markers` | Your timeline markers (timestamp, label, color, icon, optional region end). |
 

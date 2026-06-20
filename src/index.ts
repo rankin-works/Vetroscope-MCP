@@ -13,6 +13,7 @@ import {
   queryEntries,
   listTags,
   getTagBreakdown,
+  getTagStats,
   getAppStats,
   listMarkers,
   getSessions,
@@ -204,10 +205,12 @@ server.registerTool(
   {
     title: "List tags",
     description:
-      "List all of the user's tags (id, name, color, sticky flag). Useful as a reference before calling get_tag_breakdown or filtering entries by tag.",
-    inputSchema: {},
+      "List the user's tags (id, name, color, sticky flag, archived flag, and parentId/parentName for nested tags). Archived tags are hidden by default — set include_archived to see them. Useful as a reference before calling get_tag_breakdown / get_tag_stats or filtering entries by tag.",
+    inputSchema: {
+      include_archived: z.boolean().optional().describe("Include archived tags (hidden by default, matching the app)."),
+    },
   },
-  async () => asJson(listTags(db()))
+  async ({ include_archived }) => asJson(listTags(db(), { includeArchived: include_archived }))
 );
 
 server.registerTool(
@@ -239,6 +242,31 @@ server.registerTool(
     if (!result) {
       return {
         content: [{ type: "text" as const, text: `No tag found matching "${args.tag}". Call list_tags to see available tags.` }],
+        isError: true,
+      };
+    }
+    return asJson(result);
+  }
+);
+
+server.registerTool(
+  "get_tag_stats",
+  {
+    title: "Get tag statistics",
+    description:
+      "Deeper statistics for a single tag — the tag counterpart to get_app_stats. Lifetime totals (days active, first/last seen, average per active day), period totals, top apps under the tag, daily series, hour-of-day (24 buckets) and weekday (7 buckets) distributions, plus the tag's place in the hierarchy: its parent and its immediate children with rolled-up totals. The tag's own totals count directly-assigned time only; children are reported separately. Identify the tag by name (case-insensitive) or numeric id — call list_tags first if unsure.",
+    inputSchema: {
+      tag: z.string().describe("Tag name (case-insensitive). Numeric strings are treated as tag IDs."),
+      period: z.string().describe(PERIOD_DESCRIPTION + ". Defaults to 'week'.").default("week"),
+      device: z.string().optional().describe(DEVICE_DESC),
+    },
+  },
+  async ({ tag, period, device }) => {
+    const idMaybe = /^\d+$/.test(tag) ? Number(tag) : tag;
+    const result = getTagStats(db(), idMaybe, period, device);
+    if (!result) {
+      return {
+        content: [{ type: "text" as const, text: `No tag found matching "${tag}". Call list_tags to see available tags.` }],
         isError: true,
       };
     }

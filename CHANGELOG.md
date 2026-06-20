@@ -2,6 +2,20 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.3.0 — 2026-06-20
+
+### Added
+
+- **New tool: `get_tag_stats`.** The tag counterpart to `get_app_stats`. Returns lifetime totals (days active, first/last seen, average per active day), period totals, top apps under the tag, a daily series, and hour-of-day (24 buckets) / weekday (7 buckets) distributions — plus the tag's place in the hierarchy: its parent and its immediate children with totals rolled up across each child and all of its descendants. The tag's own totals count directly-assigned time only (children are reported separately), matching the app's tag-stats panel. Unlike `get_app_stats`, it never returns null for a tag that exists but has no direct time, so a pure parent tag still reports its children.
+
+### Changed
+
+- **`list_tags` now reflects the tag hierarchy and hides archived tags.** Each tag gains `archived`, `parentId`, and `parentName` fields. Archived tags are now excluded by default to match the app (pass `include_archived: true` to see them). Previously archived tags were surfaced as if active and nested tags carried no parent information, so an LLM had no way to reason about Vetroscope's tag tree.
+
+### Notes
+
+- `parentId` / `parentName` / `archived` come from the `parent_id` and `archived` columns added to the `tags` table in later Vetroscope releases; on older databases without those columns the fields are reported as `null` / `false` and archived filtering is skipped.
+
 ## 1.2.0 — 2026-05-15
 
 ### Added
