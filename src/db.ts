@@ -36,19 +36,29 @@ export function resolveDbPath(): string {
   if (explicit) return explicit;
 
   const dir = getVetroscopeDir();
+
+  // Pick the active account's DB filename (anonymous default otherwise).
+  // auth-state.json stays in the root regardless of where the DBs live.
+  let file = "vetroscope.db";
   const authStatePath = join(dir, "auth-state.json");
   if (existsSync(authStatePath)) {
     try {
       const raw = readFileSync(authStatePath, "utf-8");
       const parsed = JSON.parse(raw) as { activeUserId?: string | null };
       if (parsed.activeUserId) {
-        return join(dir, `vetroscope-${parsed.activeUserId}.db`);
+        file = `vetroscope-${parsed.activeUserId}.db`;
       }
     } catch {
       // fall through to anonymous DB
     }
   }
-  return join(dir, "vetroscope.db");
+
+  // Newer app versions nest the DB files under a Data/ subfolder. Prefer that,
+  // but fall back to the legacy root location so this MCP still works against an
+  // app install that hasn't migrated yet.
+  const dataPath = join(dir, "Data", file);
+  if (existsSync(dataPath)) return dataPath;
+  return join(dir, file);
 }
 
 export function openDb(path = resolveDbPath()): Database.Database {
