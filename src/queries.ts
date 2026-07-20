@@ -1649,6 +1649,144 @@ export function listMarkers(db: Database.Database, period?: string): Marker[] {
   return rows;
 }
 
+// ── reminders ─────────────────────────────────────────────────────────────
+
+/**
+ * Reminder tables were added after the initial Vetroscope release. Keep the
+ * MCP usable against earlier databases by treating the feature as unavailable
+ * rather than allowing a missing-table SQLite error to escape a tool call.
+ */
+function hasTable(db: Database.Database, table: string): boolean {
+  try {
+    return !!db
+      .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`)
+      .get(table);
+  } catch {
+    return false;
+  }
+}
+
+export interface Reminder {
+  uuid: string;
+  title: string;
+  body: string | null;
+  kind: string;
+  fireAt: string | null;
+  weekdays: string | null;
+  timeOfDay: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  tagUuid: string | null;
+  thresholdSeconds: number | null;
+  period: string | null;
+  enabled: boolean;
+  lastFiredAt: string | null;
+}
+
+/**
+ * List configured reminders. Disabled reminders are hidden by default,
+ * matching the app's active-reminder presentation; includeDisabled exposes
+ * them for auditing. Icon data URLs are intentionally omitted.
+ */
+export function listReminders(
+  db: Database.Database,
+  { includeDisabled = false }: { includeDisabled?: boolean } = {}
+): Reminder[] {
+  if (!hasTable(db, "reminders")) return [];
+
+  try {
+    const cols = db.prepare(`PRAGMA table_info(reminders)`).all() as Array<{ name: string }>;
+    const has = (name: string) => cols.some((column) => column.name === name);
+    const select = (name: string, alias: string, fallback = "NULL") =>
+      `${has(name) ? name : fallback} AS ${alias}`;
+    const where = [
+      has("deleted") ? "deleted = 0" : "1 = 1",
+      includeDisabled || !has("enabled") ? "1 = 1" : "enabled = 1",
+    ];
+
+    return db.prepare(
+      `SELECT ${select("uuid", "uuid")}, ${select("title", "title", "''")},
+              ${select("body", "body")}, ${select("kind", "kind", "''")},
+              ${select("fire_at", "fireAt")}, ${select("weekdays", "weekdays")},
+              ${select("time_of_day", "timeOfDay")}, ${select("start_date", "startDate")},
+              ${select("end_date", "endDate")}, ${select("tag_uuid", "tagUuid")},
+              ${select("threshold_seconds", "thresholdSeconds")}, ${select("period", "period")},
+              ${has("enabled") ? "enabled" : "1"} AS enabled,
+              ${select("last_fired_at", "lastFiredAt")}
+         FROM reminders
+        WHERE ${where.join(" AND ")}
+        ORDER BY ${has("created_at") ? "created_at" : "rowid"} DESC`
+    ).all().map((row: unknown) => {
+      const reminder = row as Omit<Reminder, "enabled"> & { enabled: number };
+      return { ...reminder, enabled: reminder.enabled === 1 };
+    });
+  } catch {
+    return [];
+  }
+}
+
+export interface ReminderEvent {
+  uuid: string;
+  reminderUuid: string;
+  title: string;
+  body: string | null;
+  firedAt: string;
+  readAt: string | null;
+  dismissedAt: string | null;
+}
+
+/**
+ * List notification history. Results exclude soft-deleted sync tombstones
+ * and deliberately omit the potentially large notification icon data URL.
+ */
+export function listReminderEvents(
+  db: Database.Database,
+  opts: {
+    period?: string;
+    unreadOnly?: boolean;
+    reminderUuid?: string;
+    limit?: number;
+  } = {}
+): ReminderEvent[] {
+  if (!hasTable(db, "reminder_events")) return [];
+
+  try {
+    const cols = db.prepare(`PRAGMA table_info(reminder_events)`).all() as Array<{ name: string }>;
+    const has = (name: string) => cols.some((column) => column.name === name);
+    const select = (name: string, alias: string, fallback = "NULL") =>
+      `${has(name) ? name : fallback} AS ${alias}`;
+    const where: string[] = [has("deleted") ? "deleted = 0" : "1 = 1"];
+    const params: (string | number)[] = [];
+    if (opts.period) {
+      const range = parsePeriod(opts.period);
+      where.push("fired_at >= ? AND fired_at < ?");
+      params.push(range.start, range.end);
+    }
+    if (opts.unreadOnly) {
+      where.push("read_at IS NULL AND dismissed_at IS NULL");
+    }
+    if (opts.reminderUuid) {
+      where.push("reminder_uuid = ?");
+      params.push(opts.reminderUuid);
+    }
+    const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
+    params.push(limit);
+
+    return db.prepare(
+      `SELECT ${select("uuid", "uuid")}, ${select("reminder_uuid", "reminderUuid")},
+              ${select("title", "title", "''")}, ${select("body", "body")},
+              ${select("fired_at", "firedAt", "''")}, ${select("read_at", "readAt")},
+              ${select("dismissed_at", "dismissedAt")}
+         FROM reminder_events
+        WHERE ${where.join(" AND ")}
+        ORDER BY fired_at DESC
+        LIMIT ?`
+    ).all(...params) as ReminderEvent[];
+  } catch {
+    return [];
+  }
+}
+
 // ── get_sessions ──────────────────────────────────────────────────────────
 
 export interface Session {

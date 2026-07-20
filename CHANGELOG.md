@@ -2,6 +2,12 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.5.0 — 2026-07-20
+
+### Added
+
+- **New tools: `list_reminders` and `list_reminder_events`.** List configured one-time, recurring weekday, and tag-threshold reminders, plus their notification history. Reminder events can be filtered by period, unread status, or reminder UUID; configured reminders can include disabled rows on request. Both tools degrade to an empty list against Vetroscope databases that predate the reminder tables, and omit large notification icon data URLs.
+
 ## 1.4.0 — 2026-06-20
 
 ### Added

@@ -16,6 +16,8 @@ import {
   getTagStats,
   getAppStats,
   listMarkers,
+  listReminders,
+  listReminderEvents,
   getSessions,
   getCurrentStatus,
   getGoalAchievements,
@@ -82,7 +84,7 @@ const SERVER_ICONS = [
 
 const server = new McpServer({
   name: "vetroscope-mcp",
-  version: "1.2.0",
+  version: "1.5.0",
   title: "Vetroscope",
   description:
     "Read-only access to your local Vetroscope time-tracking database — apps, projects, goals, and individual sessions.",
@@ -313,6 +315,46 @@ server.registerTool(
     },
   },
   async ({ period }) => asJson(listMarkers(db(), period))
+);
+
+server.registerTool(
+  "list_reminders",
+  {
+    title: "List reminders",
+    description:
+      "Configured Vetroscope reminders, including one-time, recurring weekday, and tag-threshold reminders. Disabled reminders are omitted by default; enable include_disabled to audit them. Notification icon data is not returned.",
+    inputSchema: {
+      include_disabled: z.boolean().optional()
+        .describe("Include disabled reminders (hidden by default)."),
+    },
+  },
+  async ({ include_disabled }) =>
+    asJson(listReminders(db(), { includeDisabled: include_disabled }))
+);
+
+server.registerTool(
+  "list_reminder_events",
+  {
+    title: "List reminder events",
+    description:
+      "History of reminder notifications that fired, with optional time window, unread-only status, or originating reminder UUID filters. Soft-deleted events and notification icon data are omitted.",
+    inputSchema: {
+      period: z.string().describe(PERIOD_DESCRIPTION).optional(),
+      unread_only: z.boolean().optional()
+        .describe("Return only events that are neither read nor dismissed."),
+      reminder_uuid: z.string().optional()
+        .describe("Restrict to a configured reminder UUID from list_reminders."),
+      limit: z.number().int().min(1).max(500).optional()
+        .describe("Max events returned (default 100)."),
+    },
+  },
+  async (args) =>
+    asJson(listReminderEvents(db(), {
+      period: args.period,
+      unreadOnly: args.unread_only,
+      reminderUuid: args.reminder_uuid,
+      limit: args.limit,
+    }))
 );
 
 server.registerTool(
