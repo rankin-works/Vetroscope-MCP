@@ -2,6 +2,18 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.5.2 — 2026-07-20
+
+### Changed
+
+- **`list_reminders` includes `endTimeOfDay`.** Daily window end for interval schedules (with `timeOfDay` as the start).
+
+## 1.5.1 — 2026-07-20
+
+### Changed
+
+- **`list_reminders` includes `intervalSeconds`.** Surfaces every-N interval reminders and optional tag re-fire cadences when the local Vetroscope DB has the column.
+
 ## 1.5.0 — 2026-07-20
 
 ### Added

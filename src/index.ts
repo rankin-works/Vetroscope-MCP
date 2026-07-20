@@ -322,7 +322,7 @@ server.registerTool(
   {
     title: "List reminders",
     description:
-      "Configured Vetroscope reminders, including one-time, recurring weekday, and tag-threshold reminders. Disabled reminders are omitted by default; enable include_disabled to audit them. Notification icon data is not returned.",
+      "Configured Vetroscope reminders, including one-time, recurring weekday, every-N interval, and tag-threshold reminders. Disabled reminders are omitted by default; enable include_disabled to audit them. Notification icon data is not returned.",
     inputSchema: {
       include_disabled: z.boolean().optional()
         .describe("Include disabled reminders (hidden by default)."),

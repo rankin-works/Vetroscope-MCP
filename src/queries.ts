@@ -1674,11 +1674,13 @@ export interface Reminder {
   fireAt: string | null;
   weekdays: string | null;
   timeOfDay: string | null;
+  endTimeOfDay: string | null;
   startDate: string | null;
   endDate: string | null;
   tagUuid: string | null;
   thresholdSeconds: number | null;
   period: string | null;
+  intervalSeconds: number | null;
   enabled: boolean;
   lastFiredAt: string | null;
 }
@@ -1708,9 +1710,11 @@ export function listReminders(
       `SELECT ${select("uuid", "uuid")}, ${select("title", "title", "''")},
               ${select("body", "body")}, ${select("kind", "kind", "''")},
               ${select("fire_at", "fireAt")}, ${select("weekdays", "weekdays")},
-              ${select("time_of_day", "timeOfDay")}, ${select("start_date", "startDate")},
+              ${select("time_of_day", "timeOfDay")}, ${select("end_time_of_day", "endTimeOfDay")},
+              ${select("start_date", "startDate")},
               ${select("end_date", "endDate")}, ${select("tag_uuid", "tagUuid")},
               ${select("threshold_seconds", "thresholdSeconds")}, ${select("period", "period")},
+              ${select("interval_seconds", "intervalSeconds")},
               ${has("enabled") ? "enabled" : "1"} AS enabled,
               ${select("last_fired_at", "lastFiredAt")}
          FROM reminders
