@@ -2,6 +2,12 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.5.3 — 2026-07-20
+
+### Added
+
+- **`list_reminders` surfaces app, presence, and goal fields.** Includes `appName`, `goalUuid`, `goalNotifyHalf`, and `goalNotifyComplete` when present in the local DB. Tool description covers app milestones, continuous app-session reminders, and daily goal digests.
+
 ## 1.5.2 — 2026-07-20
 
 ### Changed

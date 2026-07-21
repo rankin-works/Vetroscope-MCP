@@ -1681,6 +1681,10 @@ export interface Reminder {
   thresholdSeconds: number | null;
   period: string | null;
   intervalSeconds: number | null;
+  appName: string | null;
+  goalUuid: string | null;
+  goalNotifyHalf: boolean | null;
+  goalNotifyComplete: boolean | null;
   enabled: boolean;
   lastFiredAt: string | null;
 }
@@ -1715,14 +1719,27 @@ export function listReminders(
               ${select("end_date", "endDate")}, ${select("tag_uuid", "tagUuid")},
               ${select("threshold_seconds", "thresholdSeconds")}, ${select("period", "period")},
               ${select("interval_seconds", "intervalSeconds")},
+              ${select("app_name", "appName")},
+              ${select("goal_uuid", "goalUuid")},
+              ${select("goal_notify_half", "goalNotifyHalf")},
+              ${select("goal_notify_complete", "goalNotifyComplete")},
               ${has("enabled") ? "enabled" : "1"} AS enabled,
               ${select("last_fired_at", "lastFiredAt")}
          FROM reminders
         WHERE ${where.join(" AND ")}
         ORDER BY ${has("created_at") ? "created_at" : "rowid"} DESC`
     ).all().map((row: unknown) => {
-      const reminder = row as Omit<Reminder, "enabled"> & { enabled: number };
-      return { ...reminder, enabled: reminder.enabled === 1 };
+      const reminder = row as Omit<Reminder, "enabled" | "goalNotifyHalf" | "goalNotifyComplete"> & {
+        enabled: number;
+        goalNotifyHalf: number | null;
+        goalNotifyComplete: number | null;
+      };
+      return {
+        ...reminder,
+        enabled: reminder.enabled === 1,
+        goalNotifyHalf: reminder.goalNotifyHalf == null ? null : reminder.goalNotifyHalf !== 0,
+        goalNotifyComplete: reminder.goalNotifyComplete == null ? null : reminder.goalNotifyComplete !== 0,
+      };
     });
   } catch {
     return [];
