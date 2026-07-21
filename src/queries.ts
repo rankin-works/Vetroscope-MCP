@@ -1682,6 +1682,7 @@ export interface Reminder {
   period: string | null;
   intervalSeconds: number | null;
   appName: string | null;
+  project: string | null;
   goalUuid: string | null;
   goalNotifyHalf: boolean | null;
   goalNotifyComplete: boolean | null;
@@ -1720,6 +1721,7 @@ export function listReminders(
               ${select("threshold_seconds", "thresholdSeconds")}, ${select("period", "period")},
               ${select("interval_seconds", "intervalSeconds")},
               ${select("app_name", "appName")},
+              ${select("project", "project")},
               ${select("goal_uuid", "goalUuid")},
               ${select("goal_notify_half", "goalNotifyHalf")},
               ${select("goal_notify_complete", "goalNotifyComplete")},

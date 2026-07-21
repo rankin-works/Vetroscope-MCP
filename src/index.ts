@@ -322,7 +322,7 @@ server.registerTool(
   {
     title: "List reminders",
     description:
-      "Configured Vetroscope reminders, including one-time, recurring weekday, every-N interval, tag/app period milestones, continuous app-session presence, and daily goal progress/milestone reminders. Disabled reminders are omitted by default; enable include_disabled to audit them. Notification icon data is not returned.",
+      "Configured Vetroscope reminders, including one-time, recurring weekday, every-N interval, tag/app period milestones (optional project breakdown), continuous app-session presence (optional project), and daily goal progress/milestone reminders. Disabled reminders are omitted by default; enable include_disabled to audit them. Notification icon data is not returned.",
     inputSchema: {
       include_disabled: z.boolean().optional()
         .describe("Include disabled reminders (hidden by default)."),

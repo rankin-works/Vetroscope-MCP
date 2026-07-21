@@ -2,6 +2,12 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.5.4 — 2026-07-20
+
+### Added
+
+- **`list_reminders` includes optional `project`.** Breakdown scope for app milestone and app-session presence reminders (`null` = entire app).
+
 ## 1.5.3 — 2026-07-20
 
 ### Added
