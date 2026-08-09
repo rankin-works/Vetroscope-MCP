@@ -28,6 +28,7 @@ import {
   getDeviceBreakdown,
   getMusicSplit,
   getCategoryBreakdown,
+  listCategories,
   getListeningHistory,
   getFocusHeatmap,
   getMediaLinks,
@@ -507,11 +508,22 @@ server.registerTool(
 );
 
 server.registerTool(
+  "list_categories",
+  {
+    title: "List activity categories",
+    description:
+      "Returns Vetroscope's activity-category taxonomy (coding, creative, productivity, communication, entertainment, music, gaming, browsing, system, other) with label and color. Same ids Charts / Settings use. Call before get_category_breakdown when you need the full list of labels.",
+    inputSchema: {},
+  },
+  async () => asJson(listCategories(db()))
+);
+
+server.registerTool(
   "get_category_breakdown",
   {
-    title: "Get time by app category",
+    title: "Get time by activity category",
     description:
-      "Rolls up app totals into broad categories (editor, browser, adobe, communication, gaming, productivity, creative, music_creation, etc.) so you can ask 'how much creative work vs coding?' without naming every app. Categories mirror Vetroscope's internal app grouping. Apps not in the canonical map land in 'uncategorized' — useful for spotting missing classifications.",
+      "Rolls up app totals into Vetroscope activity categories (coding, creative, productivity, communication, entertainment, music, gaming, browsing, system, other) — the same taxonomy as Charts and Settings. Prefer category labels from the result verbatim. Apps without a mapping land in 'other'.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).default("week"),
       hour_start: z.number().int().min(0).max(24).optional().describe(HOUR_START_DESC),

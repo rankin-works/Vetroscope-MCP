@@ -18,7 +18,7 @@ Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip,
 | `get_calendar` | Dense per-day series (heatmap data) for any period — defaults to a full year. |
 | `get_device_breakdown` | Per-device totals when you run Vetroscope across multiple machines. |
 | `get_music_split` | Music-vs-work analysis: work-with-music / music-only / heads-down-work / other, plus per-source (Spotify, SoundCloud, …) overlap totals. Classifier is overridable per call. |
-| `get_category_breakdown` | Time rolled up into broad categories: editor, browser, adobe, communication, gaming, productivity, creative, etc. Mirrors Vetroscope's internal app grouping. |
+| `get_category_breakdown` | Time rolled up into Vetroscope activity categories (`coding`, `creative`, `productivity`, `communication`, `entertainment`, `music`, `gaming`, `browsing`, `system`, `other`) — same taxonomy as Charts / Settings. |
 | `get_listening_history` | Top tracks and top artists across native music apps and browser music sites, plus per-day listening minutes. Artists parsed from the "Artist — Title" sub_project convention. |
 | `get_media_links` | Canonical deep-links Vetroscope captured for media you actually played — Spotify `spotify:track:…` URIs and YouTube `youtube.com/watch?v=…` URLs — joined with the matching time data. Requires Vetroscope ≥ 0.2.30 with `capture_media_links` enabled. |
 | `get_focus_heatmap` | 7×24 grid of active foreground seconds — when do you usually do specific kinds of work. Optional app / project / tag filter to narrow to a single activity; `include_descendants` rolls up a parent tag's subtree. |
@@ -28,6 +28,7 @@ Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip,
 | Tool | What it does |
 |------|--------------|
 | `list_tags` | Your tags with id, name, color, sticky flag, archived flag, and parentId/parentName for nested tags. Archived tags hidden by default (`include_archived` to show). |
+| `list_categories` | Activity-category taxonomy (id, label, color) — coding, creative, productivity, and the rest. |
 | `list_projects` | Every (app, project) pair ever tracked with all-time totals + first/last seen + optional substring search. |
 | `list_markers` | Your timeline markers (timestamp, label, color, icon, optional region end). |
 | `list_notes` | Your notes (title, markdown-ish body excerpt with bullets/bold/italic/@mentions, optional timestamp/region, pin, folder). Optional `folder` filter (UUID, name, or `none`). |
@@ -201,7 +202,7 @@ Bug fixes and internal refactors that don't change the API surface are patch bum
 Things explicitly **not** under the SemVer contract:
 
 - Internal helpers and types not exported from the npm package
-- The set of canonical app names in `src/categories.ts` (the `categorizeApp` function may classify the same app differently between minor versions as Vetroscope adds apps)
+- The activity-category taxonomy in `src/categories.ts` (ids stay stable; seed mappings in Vetroscope may classify more apps over time)
 - The exact wording of tool descriptions
 - Error message text
 

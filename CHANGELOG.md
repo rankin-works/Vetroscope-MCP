@@ -2,6 +2,16 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.5.9 — 2026-08-09
+
+### Changed
+
+- **`get_category_breakdown` uses Vetroscope activity categories.** Returns `coding` / `creative` / `productivity` / `communication` / `entertainment` / `music` / `gaming` / `browsing` / `system` / `other` (same taxonomy as Charts and Settings), reading `ai_app_categories` when present. Response rows use `categoryId` + `label` + `color` instead of the old `editor` / `adobe` / … bucket ids.
+
+### Added
+
+- **New tool: `list_categories`.** Fixed activity-category taxonomy with label and color.
+
 ## 1.5.8 — 2026-08-09
 
 ### Changed

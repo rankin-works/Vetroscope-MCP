@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { parsePeriod, type Range } from "./periods.js";
-import { categorizeApp, CATEGORY_LABELS, type AppCategory } from "./categories.js";
+import { getCategoryMeta, isCategoryId, CATEGORY_TAXONOMY, type ActivityCategoryId } from "./categories.js";
 
 /**
  * Vetroscope polls every 30s. The dashboard computes durations as the count
@@ -2885,15 +2885,54 @@ export function getMusicSplit(
   };
 }
 
-// ── get_category_breakdown ────────────────────────────────────────────────
+// ── list_categories / get_category_breakdown ──────────────────────────────
+
+export interface CategoryMetaRow {
+  categoryId: ActivityCategoryId;
+  label: string;
+  color: string;
+  sortOrder: number;
+}
+
+/** Fixed activity-category taxonomy (same ids/labels as the Vetroscope app). */
+export function listCategories(db: Database.Database): CategoryMetaRow[] {
+  if (hasTable(db, "ai_category_meta")) {
+    try {
+      const rows = db.prepare(
+        `SELECT category_id, label, color, sort_order
+           FROM ai_category_meta
+          ORDER BY sort_order`,
+      ).all() as Array<{ category_id: string; label: string; color: string; sort_order: number }>;
+      if (rows.length > 0) {
+        return rows.map((r) => {
+          const id = (isCategoryId(r.category_id) ? r.category_id : "other") as ActivityCategoryId;
+          const meta = getCategoryMeta(id);
+          return {
+            categoryId: id,
+            label: r.label || meta.label,
+            color: r.color || meta.color,
+            sortOrder: r.sort_order,
+          };
+        });
+      }
+    } catch { /* fall through to in-code taxonomy */ }
+  }
+  return CATEGORY_TAXONOMY.map((c) => ({
+    categoryId: c.id,
+    label: c.label,
+    color: c.color,
+    sortOrder: c.sortOrder,
+  }));
+}
 
 export interface CategoryTotal {
-  category: AppCategory;
-  /** Human label suitable for display ("Code Editors / IDEs"). */
+  categoryId: ActivityCategoryId;
+  /** Human label suitable for display ("Coding & Development"). */
   label: string;
+  color: string;
   /** Active foreground seconds across all apps in this category. */
   totalSeconds: number;
-  /** Background away-listening seconds (mostly relevant for `media`). */
+  /** Background away-listening seconds. */
   passiveSeconds: number;
   /** Apps in this category that contributed time, sorted by seconds desc. */
   apps: AppTotal[];
@@ -2905,11 +2944,23 @@ export interface CategoryBreakdownResult extends Range {
   categories: CategoryTotal[];
 }
 
+function resolveAppCategoryId(db: Database.Database, appName: string): ActivityCategoryId {
+  if (hasTable(db, "ai_app_categories")) {
+    try {
+      const row = db.prepare(
+        `SELECT category_id FROM ai_app_categories
+          WHERE app_name = ? AND project = '' AND deleted = 0`,
+      ).get(appName) as { category_id: string } | undefined;
+      if (row && isCategoryId(row.category_id)) return row.category_id;
+    } catch { /* fall through */ }
+  }
+  return "other";
+}
+
 /**
- * Rolls up app totals into Vetroscope's broader categories: editors, browsers,
- * Adobe creative cloud, communication, gaming, etc. Apps not in the canonical
- * map land in `uncategorized` so the LLM can see what's missing classification.
- * Same time / device filters as get_report.
+ * Rolls up app totals into Vetroscope activity categories (coding,
+ * creative, …) — the same taxonomy Charts / Settings use. Prefer
+ * `ai_app_categories` when present; otherwise apps land in `other`.
  */
 export function getCategoryBreakdown(
   db: Database.Database,
@@ -2958,19 +3009,21 @@ export function getCategoryBreakdown(
     });
   }
 
-  const catMap = new Map<AppCategory, CategoryTotal>();
+  const catMap = new Map<ActivityCategoryId, CategoryTotal>();
   for (const app of appMap.values()) {
-    const cat = categorizeApp(app.app);
-    let bucket = catMap.get(cat);
+    const categoryId = resolveAppCategoryId(db, app.app);
+    const meta = getCategoryMeta(categoryId);
+    let bucket = catMap.get(categoryId);
     if (!bucket) {
       bucket = {
-        category: cat,
-        label: CATEGORY_LABELS[cat],
+        categoryId,
+        label: meta.label,
+        color: meta.color,
         totalSeconds: 0,
         passiveSeconds: 0,
         apps: [],
       };
-      catMap.set(cat, bucket);
+      catMap.set(categoryId, bucket);
     }
     bucket.totalSeconds += app.seconds;
     bucket.passiveSeconds += app.passiveSeconds;
@@ -2982,17 +3035,10 @@ export function getCategoryBreakdown(
   }
   categories.sort((a, b) => (b.totalSeconds + b.passiveSeconds) - (a.totalSeconds + a.passiveSeconds));
 
-  let total = 0;
-  let totalPassive = 0;
-  for (const c of categories) {
-    total += c.totalSeconds;
-    totalPassive += c.passiveSeconds;
-  }
-
   return {
     ...range,
-    totalSeconds: total,
-    totalPassiveSeconds: totalPassive,
+    totalSeconds: categories.reduce((s, c) => s + c.totalSeconds, 0),
+    totalPassiveSeconds: categories.reduce((s, c) => s + c.passiveSeconds, 0),
     categories,
   };
 }
