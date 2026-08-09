@@ -323,7 +323,7 @@ server.registerTool(
   {
     title: "List notes",
     description:
-      "User notes on the Vetroscope timeline (title, plain-text body excerpt, timestamp, optional region end, optional linked marker uuid). Pass a period to scope to a window — notes whose region OVERLAPS the period are returned. Omit period to list every note. Returns [] on installs that predate the notes table.",
+      "User notes (title, plain-text body excerpt, optional timestamp/region, optional linked event, pin + folder). Pass a period to scope timed notes whose region OVERLAPS the window — timeless notes are omitted from period filters. Omit period to list every note. Returns [] on installs that predate the notes table.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).optional(),
     },

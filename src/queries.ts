@@ -1674,9 +1674,11 @@ export interface Note {
   title: string;
   /** Plain-text excerpt of the TipTap body, truncated ~500 chars. */
   bodyExcerpt: string;
-  timestamp: string;
+  timestamp: string | null;
   endTimestamp: string | null;
   markerUuid: string | null;
+  pinned?: boolean;
+  folderUuid?: string | null;
 }
 
 /** Best-effort plain text from TipTap JSON (mirrors the desktop helper). */
@@ -1749,7 +1751,9 @@ export function listNotes(db: Database.Database, period?: string): Note[] {
 
     if (period) {
       const range = parsePeriod(period);
-      // Same overlap semantics as list_markers.
+      // Same overlap semantics as list_markers. Timeless notes (null
+      // timestamp) are excluded from period-scoped lists.
+      where.push("timestamp IS NOT NULL");
       where.push("timestamp < ?");
       params.push(range.end);
       if (hasEnd) {
@@ -1761,21 +1765,35 @@ export function listNotes(db: Database.Database, period?: string): Note[] {
       }
     }
 
+    const hasPinned = has("pinned");
+    const hasFolder = has("folder_uuid");
+    const hasUpdated = has("updated_at");
+    const pinnedSelect = hasPinned ? "pinned" : "0 AS pinned";
+    const folderSelect = hasFolder ? "folder_uuid AS folderUuid" : "NULL AS folderUuid";
+    const orderBy = hasPinned && hasUpdated
+      ? "pinned DESC, updated_at DESC"
+      : hasUpdated
+        ? "updated_at DESC"
+        : "timestamp DESC";
+
     const rows = db
       .prepare(
-        `SELECT id, ${uuidSelect}, title, ${bodySelect}, timestamp, ${endSelect}, ${markerSelect}
+        `SELECT id, ${uuidSelect}, title, ${bodySelect}, timestamp, ${endSelect}, ${markerSelect},
+                ${pinnedSelect}, ${folderSelect}
            FROM notes
           WHERE ${where.join(" AND ")}
-          ORDER BY timestamp DESC`,
+          ORDER BY ${orderBy}`,
       )
       .all(...params) as Array<{
         id: number;
         uuid: string;
         title: string;
         body: string;
-        timestamp: string;
+        timestamp: string | null;
         endTimestamp: string | null;
         markerUuid: string | null;
+        pinned: number;
+        folderUuid: string | null;
       }>;
 
     return rows.map((r) => ({
@@ -1783,9 +1801,11 @@ export function listNotes(db: Database.Database, period?: string): Note[] {
       uuid: r.uuid,
       title: r.title,
       bodyExcerpt: truncateExcerpt(tipTapJsonToPlainText(r.body ?? "")),
-      timestamp: r.timestamp,
+      timestamp: r.timestamp ?? null,
       endTimestamp: r.endTimestamp ?? null,
       markerUuid: r.markerUuid ?? null,
+      pinned: Number(r.pinned) === 1,
+      folderUuid: r.folderUuid ?? null,
     }));
   } catch {
     return [];
