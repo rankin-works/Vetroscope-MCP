@@ -1679,6 +1679,15 @@ export interface Note {
   markerUuid: string | null;
   pinned?: boolean;
   folderUuid?: string | null;
+  folderName?: string | null;
+}
+
+export interface NoteFolder {
+  uuid: string;
+  name: string;
+  parentUuid: string | null;
+  /** Nested path like "Work / Clients". */
+  path: string;
 }
 
 /** Best-effort plain text from TipTap JSON (mirrors the desktop helper). */
@@ -1724,11 +1733,16 @@ function truncateExcerpt(text: string, max = 500): string {
 }
 
 /**
- * User notes on the timeline. Soft-deleted rows are hidden. Period filter
- * is optional — omit to return every live note. Degrades to [] when the
- * `notes` table is missing (pre-notes Vetroscope installs).
+ * User notes. Soft-deleted rows are hidden. Period filter is optional —
+ * omit to return every live note. Optional `folder` filters to one folder
+ * (UUID or exact name) or `"none"` for unfiled notes. Degrades to [] when
+ * the `notes` table is missing (pre-notes Vetroscope installs).
  */
-export function listNotes(db: Database.Database, period?: string): Note[] {
+export function listNotes(
+  db: Database.Database,
+  period?: string,
+  folder?: string,
+): Note[] {
   if (!hasTable(db, "notes")) return [];
 
   try {
@@ -1776,6 +1790,39 @@ export function listNotes(db: Database.Database, period?: string): Note[] {
         ? "updated_at DESC"
         : "timestamp DESC";
 
+    const folderNameByUuid = new Map<string, string>();
+    let foldersCached: NoteFolder[] | null = null;
+    const folders = () => {
+      if (!foldersCached) foldersCached = listNoteFolders(db);
+      return foldersCached;
+    };
+    for (const f of folders()) folderNameByUuid.set(f.uuid, f.name);
+
+    const folderFilter = (folder ?? "").trim();
+    let folderUuidFilter: string | null | undefined;
+    if (folderFilter && hasFolder) {
+      if (folderFilter.toLowerCase() === "none") {
+        folderUuidFilter = null;
+      } else {
+        const all = folders();
+        const byUuid = all.find((f) => f.uuid === folderFilter);
+        if (byUuid) {
+          folderUuidFilter = byUuid.uuid;
+        } else {
+          const byName = all.filter((f) => f.name.toLowerCase() === folderFilter.toLowerCase());
+          if (byName.length === 1) folderUuidFilter = byName[0].uuid;
+          else return [];
+        }
+      }
+    }
+
+    if (folderUuidFilter === null && hasFolder) {
+      where.push("folder_uuid IS NULL");
+    } else if (typeof folderUuidFilter === "string") {
+      where.push("folder_uuid = ?");
+      params.push(folderUuidFilter);
+    }
+
     const rows = db
       .prepare(
         `SELECT id, ${uuidSelect}, title, ${bodySelect}, timestamp, ${endSelect}, ${markerSelect},
@@ -1806,6 +1853,56 @@ export function listNotes(db: Database.Database, period?: string): Note[] {
       markerUuid: r.markerUuid ?? null,
       pinned: Number(r.pinned) === 1,
       folderUuid: r.folderUuid ?? null,
+      folderName: r.folderUuid ? (folderNameByUuid.get(r.folderUuid) ?? null) : null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Note folders (nested). Soft-deleted rows are hidden. Degrades to []
+ * when the `note_folders` table is missing.
+ */
+export function listNoteFolders(db: Database.Database): NoteFolder[] {
+  if (!hasTable(db, "note_folders")) return [];
+  try {
+    const cols = db.prepare(`PRAGMA table_info(note_folders)`).all() as Array<{ name: string }>;
+    const has = (name: string) => cols.some((c) => c.name === name);
+    if (!has("uuid") || !has("name")) return [];
+    const hasDeleted = has("deleted");
+    const hasParent = has("parent_uuid");
+    const parentSelect = hasParent ? "parent_uuid AS parentUuid" : "NULL AS parentUuid";
+    const where = hasDeleted ? "deleted = 0" : "1 = 1";
+    const rows = db
+      .prepare(
+        `SELECT uuid, name, ${parentSelect}
+           FROM note_folders
+          WHERE ${where}
+          ORDER BY name COLLATE NOCASE ASC`,
+      )
+      .all() as Array<{ uuid: string; name: string; parentUuid: string | null }>;
+
+    const byUuid = new Map(rows.map((r) => [r.uuid, r]));
+    const pathFor = (uuid: string): string => {
+      const parts: string[] = [];
+      let cur: string | null = uuid;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        const f = byUuid.get(cur);
+        if (!f) break;
+        parts.unshift(f.name);
+        cur = f.parentUuid;
+      }
+      return parts.join(" / ");
+    };
+
+    return rows.map((r) => ({
+      uuid: r.uuid,
+      name: r.name,
+      parentUuid: r.parentUuid ?? null,
+      path: pathFor(r.uuid),
     }));
   } catch {
     return [];

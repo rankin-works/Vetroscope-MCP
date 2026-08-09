@@ -2,6 +2,19 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.5.7 — 2026-08-09
+
+### Added
+
+- **New tool: `list_note_folders`.** Nested note folders (`uuid`, `name`, `parentUuid`, `path`). Returns `[]` against databases that predate the folders table.
+- **`list_notes` folder filter + names.** Optional `folder` argument (UUID, exact name, or `none` for unfiled). Each note includes `folderName` when filed.
+
+## 1.5.6 — 2026-08-09
+
+### Changed
+
+- **`list_notes` surfaces pin + folder fields.** Includes `pinned` and `folderUuid` when present. Timeless notes (`timestamp: null`) are supported; period filters still omit them.
+
 ## 1.5.5 — 2026-08-08
 
 ### Added

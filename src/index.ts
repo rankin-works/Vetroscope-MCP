@@ -17,6 +17,7 @@ import {
   getAppStats,
   listMarkers,
   listNotes,
+  listNoteFolders,
   listReminders,
   listReminderEvents,
   getSessions,
@@ -323,12 +324,27 @@ server.registerTool(
   {
     title: "List notes",
     description:
-      "User notes (title, plain-text body excerpt, optional timestamp/region, optional linked event, pin + folder). Pass a period to scope timed notes whose region OVERLAPS the window — timeless notes are omitted from period filters. Omit period to list every note. Returns [] on installs that predate the notes table.",
+      "User notes (title, plain-text body excerpt, optional timestamp/region, optional linked event, pin + folder). Pass a period to scope timed notes whose region OVERLAPS the window — timeless notes are omitted from period filters. Optional folder filters to a folder UUID/exact name, or \"none\" for unfiled. Omit period to list every note. Returns [] on installs that predate the notes table.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).optional(),
+      folder: z
+        .string()
+        .describe('Optional folder UUID or exact name; pass "none" for unfiled notes.')
+        .optional(),
     },
   },
-  async ({ period }) => asJson(listNotes(db(), period))
+  async ({ period, folder }) => asJson(listNotes(db(), period, folder))
+);
+
+server.registerTool(
+  "list_note_folders",
+  {
+    title: "List note folders",
+    description:
+      "Nested note folders (uuid, name, parentUuid, path). Use with list_notes when organizing or filtering by folder. Returns [] on installs that predate note folders.",
+    inputSchema: {},
+  },
+  async () => asJson(listNoteFolders(db()))
 );
 
 server.registerTool(
