@@ -2,6 +2,12 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.5.5 — 2026-08-08
+
+### Added
+
+- **New tool: `list_notes`.** Lists user notes (title, plain-text body excerpt ~500 chars, timestamp, optional region end, optional linked marker uuid). Optional period filter uses the same overlap semantics as `list_markers`. Soft-deleted rows are hidden, and the tool returns `[]` against Vetroscope databases that predate the notes table.
+
 ## 1.5.4 — 2026-07-20
 
 ### Added

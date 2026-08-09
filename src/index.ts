@@ -16,6 +16,7 @@ import {
   getTagStats,
   getAppStats,
   listMarkers,
+  listNotes,
   listReminders,
   listReminderEvents,
   getSessions,
@@ -315,6 +316,19 @@ server.registerTool(
     },
   },
   async ({ period }) => asJson(listMarkers(db(), period))
+);
+
+server.registerTool(
+  "list_notes",
+  {
+    title: "List notes",
+    description:
+      "User notes on the Vetroscope timeline (title, plain-text body excerpt, timestamp, optional region end, optional linked marker uuid). Pass a period to scope to a window — notes whose region OVERLAPS the period are returned. Omit period to list every note. Returns [] on installs that predate the notes table.",
+    inputSchema: {
+      period: z.string().describe(PERIOD_DESCRIPTION).optional(),
+    },
+  },
+  async ({ period }) => asJson(listNotes(db(), period))
 );
 
 server.registerTool(

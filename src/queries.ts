@@ -1666,6 +1666,132 @@ function hasTable(db: Database.Database, table: string): boolean {
   }
 }
 
+// ── list_notes ────────────────────────────────────────────────────────────
+
+export interface Note {
+  id: number;
+  uuid: string;
+  title: string;
+  /** Plain-text excerpt of the TipTap body, truncated ~500 chars. */
+  bodyExcerpt: string;
+  timestamp: string;
+  endTimestamp: string | null;
+  markerUuid: string | null;
+}
+
+/** Best-effort plain text from TipTap JSON (mirrors the desktop helper). */
+function tipTapJsonToPlainText(body: string): string {
+  try {
+    const doc = JSON.parse(body) as { type?: string; content?: unknown[] };
+    if (!doc || !Array.isArray(doc.content)) return body;
+    const parts: string[] = [];
+    const walk = (nodes: unknown[]) => {
+      for (const node of nodes) {
+        if (!node || typeof node !== "object") continue;
+        const n = node as {
+          type?: string;
+          text?: string;
+          attrs?: { name?: string; label?: string };
+          content?: unknown[];
+        };
+        if (n.type === "text" && typeof n.text === "string") {
+          parts.push(n.text);
+        } else if (n.type === "mention") {
+          const label = n.attrs?.name || n.attrs?.label || "";
+          if (label) parts.push(label);
+        } else if (n.type === "hardBreak") {
+          parts.push("\n");
+        } else if (Array.isArray(n.content)) {
+          walk(n.content);
+          if (n.type === "paragraph" || n.type === "heading" || n.type === "listItem") {
+            parts.push("\n");
+          }
+        }
+      }
+    };
+    walk(doc.content);
+    return parts.join("").replace(/\n+$/, "").trim();
+  } catch {
+    return body;
+  }
+}
+
+function truncateExcerpt(text: string, max = 500): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1).trimEnd() + "…";
+}
+
+/**
+ * User notes on the timeline. Soft-deleted rows are hidden. Period filter
+ * is optional — omit to return every live note. Degrades to [] when the
+ * `notes` table is missing (pre-notes Vetroscope installs).
+ */
+export function listNotes(db: Database.Database, period?: string): Note[] {
+  if (!hasTable(db, "notes")) return [];
+
+  try {
+    const cols = db.prepare(`PRAGMA table_info(notes)`).all() as Array<{ name: string }>;
+    const has = (name: string) => cols.some((c) => c.name === name);
+    if (!has("timestamp") || !has("title")) return [];
+
+    const hasDeleted = has("deleted");
+    const hasEnd = has("end_timestamp");
+    const hasUuid = has("uuid");
+    const hasBody = has("body");
+    const hasMarker = has("marker_uuid");
+    const endSelect = hasEnd ? "end_timestamp AS endTimestamp" : "NULL AS endTimestamp";
+    const uuidSelect = hasUuid ? "uuid" : "CAST(id AS TEXT) AS uuid";
+    const bodySelect = hasBody ? "body" : "'' AS body";
+    const markerSelect = hasMarker ? "marker_uuid AS markerUuid" : "NULL AS markerUuid";
+    const baseFilter = hasDeleted ? "deleted = 0" : "1 = 1";
+    const where: string[] = [baseFilter];
+    const params: (string | number)[] = [];
+
+    if (period) {
+      const range = parsePeriod(period);
+      // Same overlap semantics as list_markers.
+      where.push("timestamp < ?");
+      params.push(range.end);
+      if (hasEnd) {
+        where.push("(end_timestamp IS NULL OR end_timestamp >= ?)");
+        params.push(range.start);
+      } else {
+        where.push("timestamp >= ?");
+        params.push(range.start);
+      }
+    }
+
+    const rows = db
+      .prepare(
+        `SELECT id, ${uuidSelect}, title, ${bodySelect}, timestamp, ${endSelect}, ${markerSelect}
+           FROM notes
+          WHERE ${where.join(" AND ")}
+          ORDER BY timestamp DESC`,
+      )
+      .all(...params) as Array<{
+        id: number;
+        uuid: string;
+        title: string;
+        body: string;
+        timestamp: string;
+        endTimestamp: string | null;
+        markerUuid: string | null;
+      }>;
+
+    return rows.map((r) => ({
+      id: r.id,
+      uuid: r.uuid,
+      title: r.title,
+      bodyExcerpt: truncateExcerpt(tipTapJsonToPlainText(r.body ?? "")),
+      timestamp: r.timestamp,
+      endTimestamp: r.endTimestamp ?? null,
+      markerUuid: r.markerUuid ?? null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
 export interface Reminder {
   uuid: string;
   title: string;
