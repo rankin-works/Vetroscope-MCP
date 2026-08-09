@@ -324,7 +324,7 @@ server.registerTool(
   {
     title: "List notes",
     description:
-      "User notes (title, plain-text body excerpt, optional timestamp/region, optional linked event, pin + folder). Pass a period to scope timed notes whose region OVERLAPS the window — timeless notes are omitted from period filters. Optional folder filters to a folder UUID/exact name, or \"none\" for unfiled. Omit period to list every note. Returns [] on installs that predate the notes table.",
+      "User notes (title, markdown-ish body excerpt with bullets/bold/italic/@mentions, optional timestamp/region, optional linked event, pin + folder). Pass a period to scope timed notes whose region OVERLAPS the window — timeless notes are omitted from period filters. Optional folder filters to a folder UUID/exact name, or \"none\" for unfiled. Omit period to list every note. Returns [] on installs that predate the notes table.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).optional(),
       folder: z

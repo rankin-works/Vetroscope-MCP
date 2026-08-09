@@ -2,6 +2,12 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.5.8 — 2026-08-09
+
+### Changed
+
+- **`list_notes` body excerpts preserve TipTap formatting.** Bullets, **bold**, *italic*, and `@mentions` / `@"Multi word"` are returned as markdown-ish text so clients can reason about note structure.
+
 ## 1.5.7 — 2026-08-09
 
 ### Added

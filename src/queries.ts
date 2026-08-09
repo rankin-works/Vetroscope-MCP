@@ -1672,7 +1672,7 @@ export interface Note {
   id: number;
   uuid: string;
   title: string;
-  /** Plain-text excerpt of the TipTap body, truncated ~500 chars. */
+  /** Markdown-ish excerpt of the TipTap body (bullets, **bold**, *italic*, @mentions), truncated ~500 chars. */
   bodyExcerpt: string;
   timestamp: string | null;
   endTimestamp: string | null;
@@ -1690,41 +1690,99 @@ export interface NoteFolder {
   path: string;
 }
 
-/** Best-effort plain text from TipTap JSON (mirrors the desktop helper). */
-function tipTapJsonToPlainText(body: string): string {
+/** TipTap JSON → markdown-ish text (bullets, bold, italic, @mentions). */
+function tipTapJsonToMarkdown(body: string): string {
   try {
-    const doc = JSON.parse(body) as { type?: string; content?: unknown[] };
-    if (!doc || !Array.isArray(doc.content)) return body;
-    const parts: string[] = [];
-    const walk = (nodes: unknown[]) => {
-      for (const node of nodes) {
-        if (!node || typeof node !== "object") continue;
-        const n = node as {
+    const doc = JSON.parse(body) as {
+      type?: string;
+      content?: Array<{
+        type?: string;
+        content?: Array<{
           type?: string;
-          text?: string;
-          attrs?: { name?: string; label?: string };
-          content?: unknown[];
-        };
-        if (n.type === "text" && typeof n.text === "string") {
-          parts.push(n.text);
-        } else if (n.type === "mention") {
-          const label = n.attrs?.name || n.attrs?.label || "";
-          if (label) parts.push(label);
-        } else if (n.type === "hardBreak") {
-          parts.push("\n");
-        } else if (Array.isArray(n.content)) {
-          walk(n.content);
-          if (n.type === "paragraph" || n.type === "heading" || n.type === "listItem") {
-            parts.push("\n");
-          }
+          content?: Array<{
+            type?: string;
+            text?: string;
+            marks?: Array<{ type?: string }>;
+            attrs?: { name?: string; label?: string };
+            content?: unknown[];
+          }>;
+        }>;
+      }>;
+    };
+    if (!doc || doc.type !== "doc" || !Array.isArray(doc.content)) {
+      return body;
+    }
+    const lines: string[] = [];
+    for (const block of doc.content) {
+      if (block.type === "bulletList" && Array.isArray(block.content)) {
+        for (const item of block.content) {
+          if (item.type !== "listItem") continue;
+          const para = item.content?.[0];
+          const text = tipTapInlineToMarkdown(
+            (para?.type === "paragraph" ? para.content : item.content) as Parameters<typeof tipTapInlineToMarkdown>[0],
+          ).trim();
+          lines.push(`- ${text}`);
+        }
+        continue;
+      }
+      if (block.type === "paragraph") {
+        lines.push(tipTapInlineToMarkdown(block.content as Parameters<typeof tipTapInlineToMarkdown>[0]));
+        continue;
+      }
+      if (block.type === "orderedList" && Array.isArray(block.content)) {
+        let i = 1;
+        for (const item of block.content) {
+          if (item.type !== "listItem") continue;
+          const para = item.content?.[0];
+          const text = tipTapInlineToMarkdown(
+            (para?.type === "paragraph" ? para.content : item.content) as Parameters<typeof tipTapInlineToMarkdown>[0],
+          ).trim();
+          lines.push(`${i}. ${text}`);
+          i += 1;
         }
       }
-    };
-    walk(doc.content);
-    return parts.join("").replace(/\n+$/, "").trim();
+    }
+    return lines.join("\n").replace(/\n+$/, "").trim();
   } catch {
     return body;
   }
+}
+
+function tipTapInlineToMarkdown(
+  nodes: Array<{
+    type?: string;
+    text?: string;
+    marks?: Array<{ type?: string }>;
+    attrs?: { name?: string; label?: string };
+    content?: unknown[];
+  }> | undefined,
+): string {
+  if (!nodes?.length) return "";
+  let out = "";
+  for (const n of nodes) {
+    if (n.type === "text" && typeof n.text === "string") {
+      let open = "";
+      let close = "";
+      if (n.marks?.some((m) => m.type === "bold")) {
+        open += "**";
+        close = `**${close}`;
+      }
+      if (n.marks?.some((m) => m.type === "italic")) {
+        open += "*";
+        close = `*${close}`;
+      }
+      out += `${open}${n.text}${close}`;
+    } else if (n.type === "mention") {
+      const name = n.attrs?.name || n.attrs?.label || "";
+      if (!name) continue;
+      out += /\s/.test(name) ? `@"${name}"` : `@${name}`;
+    } else if (n.type === "hardBreak") {
+      out += "\n";
+    } else if (Array.isArray(n.content)) {
+      out += tipTapInlineToMarkdown(n.content as typeof nodes);
+    }
+  }
+  return out;
 }
 
 function truncateExcerpt(text: string, max = 500): string {
@@ -1847,7 +1905,7 @@ export function listNotes(
       id: r.id,
       uuid: r.uuid,
       title: r.title,
-      bodyExcerpt: truncateExcerpt(tipTapJsonToPlainText(r.body ?? "")),
+      bodyExcerpt: truncateExcerpt(tipTapJsonToMarkdown(r.body ?? "")),
       timestamp: r.timestamp ?? null,
       endTimestamp: r.endTimestamp ?? null,
       markerUuid: r.markerUuid ?? null,

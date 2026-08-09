@@ -30,7 +30,7 @@ Reads your local Vetroscope SQLite directly, **read-only**. No cloud round-trip,
 | `list_tags` | Your tags with id, name, color, sticky flag, archived flag, and parentId/parentName for nested tags. Archived tags hidden by default (`include_archived` to show). |
 | `list_projects` | Every (app, project) pair ever tracked with all-time totals + first/last seen + optional substring search. |
 | `list_markers` | Your timeline markers (timestamp, label, color, icon, optional region end). |
-| `list_notes` | Your notes (title, plain-text body excerpt, optional timestamp/region, pin, folder). Optional `folder` filter (UUID, name, or `none`). |
+| `list_notes` | Your notes (title, markdown-ish body excerpt with bullets/bold/italic/@mentions, optional timestamp/region, pin, folder). Optional `folder` filter (UUID, name, or `none`). |
 | `list_note_folders` | Nested note folders (`uuid`, `name`, `parentUuid`, `path`). |
 | `list_reminders` | Configured one-time, recurring, interval, and tag-threshold reminders. Disabled reminders are hidden by default (`include_disabled` to include them). |
 | `list_reminder_events` | Reminder notification history, filterable by period, unread status, or reminder UUID. |
