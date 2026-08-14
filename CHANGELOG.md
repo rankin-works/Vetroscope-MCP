@@ -2,6 +2,12 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.5.10 — 2026-08-14
+
+### Added
+
+- **`list_note_folders` includes `color`.** Palette hex from `note_folders.color` when the local schema has the column; `null` on older databases.
+
 ## 1.5.9 — 2026-08-09
 
 ### Changed

@@ -1686,6 +1686,8 @@ export interface NoteFolder {
   uuid: string;
   name: string;
   parentUuid: string | null;
+  /** Palette hex when the local schema has `note_folders.color`. */
+  color?: string | null;
   /** Nested path like "Work / Clients". */
   path: string;
 }
@@ -1930,16 +1932,18 @@ export function listNoteFolders(db: Database.Database): NoteFolder[] {
     if (!has("uuid") || !has("name")) return [];
     const hasDeleted = has("deleted");
     const hasParent = has("parent_uuid");
+    const hasColor = has("color");
     const parentSelect = hasParent ? "parent_uuid AS parentUuid" : "NULL AS parentUuid";
+    const colorSelect = hasColor ? "color" : "NULL AS color";
     const where = hasDeleted ? "deleted = 0" : "1 = 1";
     const rows = db
       .prepare(
-        `SELECT uuid, name, ${parentSelect}
+        `SELECT uuid, name, ${parentSelect}, ${colorSelect}
            FROM note_folders
           WHERE ${where}
           ORDER BY name COLLATE NOCASE ASC`,
       )
-      .all() as Array<{ uuid: string; name: string; parentUuid: string | null }>;
+      .all() as Array<{ uuid: string; name: string; parentUuid: string | null; color: string | null }>;
 
     const byUuid = new Map(rows.map((r) => [r.uuid, r]));
     const pathFor = (uuid: string): string => {
@@ -1960,6 +1964,7 @@ export function listNoteFolders(db: Database.Database): NoteFolder[] {
       uuid: r.uuid,
       name: r.name,
       parentUuid: r.parentUuid ?? null,
+      color: r.color ?? null,
       path: pathFor(r.uuid),
     }));
   } catch {

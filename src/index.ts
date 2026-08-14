@@ -342,7 +342,7 @@ server.registerTool(
   {
     title: "List note folders",
     description:
-      "Nested note folders (uuid, name, parentUuid, path). Use with list_notes when organizing or filtering by folder. Returns [] on installs that predate note folders.",
+      "Nested note folders (uuid, name, parentUuid, path, color). Use with list_notes when organizing or filtering by folder. Returns [] on installs that predate note folders.",
     inputSchema: {},
   },
   async () => asJson(listNoteFolders(db()))
