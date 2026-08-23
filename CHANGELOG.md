@@ -2,6 +2,17 @@
 
 All notable changes to **vetroscope-mcp** will be documented here. This project follows [Semantic Versioning](https://semver.org/) starting with 1.0.0.
 
+## 1.5.11 — 2026-08-23
+
+### Fixed
+
+- **Ignored-project filter no longer drops null-project rows.** `NOT (app = ? AND project = ?)` is NULL in SQL when `project` is NULL, so any app with even one ignored project (Cursor, Chrome, …) lost every untitled / Agents-mode row from period-scoped tools. Matches the desktop Rev 5 guard (`project IS NOT NULL`).
+- **Parent-tag goals roll up descendants** in `get_goals_progress`, matching the desktop dashboard. Progress percent is capped at 100.
+
+### Changed
+
+- **`get_report` / `get_device_breakdown` descriptions** explain wall-clock totals vs per-app / per-device sums so callers do not expect the rows to add to the header.
+
 ## 1.5.10 — 2026-08-14
 
 ### Added

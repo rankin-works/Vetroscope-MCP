@@ -115,7 +115,7 @@ server.registerTool(
   {
     title: "Get time report",
     description:
-      "Aggregate Vetroscope time report for a period: total active seconds, top apps, and top projects (with sub-projects nested when present — e.g. individual YouTube videos, SoundCloud songs, Netflix episodes). Apps include the user's custom display_name when set. Applies the same SQLite settings as the desktop dashboard — ignored apps, ignored projects/breakdown patterns, and days_filter — plus optional hour-of-day/weekday/device filters layered on top. Totals therefore match Charts/Dashboard totals for the same range.",
+      "Aggregate Vetroscope time report for a period: total active seconds, top apps, and top projects (with sub-projects nested when present — e.g. individual YouTube videos, SoundCloud songs, Netflix episodes). Apps include the user's custom display_name when set. Applies the same SQLite settings as the desktop dashboard — ignored apps, ignored projects/breakdown patterns, and days_filter — plus optional hour-of-day/weekday/device filters layered on top. totalSeconds is wall-clock (each 30s bucket counted once even if two apps or two devices overlap). Per-app seconds are per-app buckets, so summing apps can exceed totalSeconds on overlap days. Do not sum the app rows and expect them to equal the header.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).default("today"),
       top_apps: z.number().int().min(0).max(500).optional().describe("Max apps returned (default 50, 0 to omit)"),
@@ -472,7 +472,7 @@ server.registerTool(
   {
     title: "Get per-device time breakdown",
     description:
-      "Time per device for users who run Vetroscope across multiple machines (or paired with the browser extension). Each device reports total active / passive seconds, days active, first/last seen, and most-frequent platform. The user's current device is flagged with isCurrent=true.",
+      "Time per device for users who run Vetroscope across multiple machines (or paired with the browser extension). Each device reports total active / passive seconds, days active, first/last seen, and most-frequent platform. The user's current device is flagged with isCurrent=true. Each device's totalSeconds is DISTINCT 30s buckets on that device — the same wall-clock slice can be credited to every device that logged it, so summing devices can exceed get_report.totalSeconds.",
     inputSchema: {
       period: z.string().describe(PERIOD_DESCRIPTION).default("month"),
     },

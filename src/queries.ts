@@ -202,7 +202,11 @@ function buildIgnoredProjectsClause(
   const clauses: string[] = [];
   const params: string[] = [];
   for (const p of ignoredProjects) {
-    clauses.push(`NOT (${prefix}app_name = ? AND ${prefix}project = ?)`);
+    // Require project IS NOT NULL. Otherwise SQL three-valued logic turns
+    // `NOT (app = ? AND project = ?)` into NULL when project is NULL, and
+    // the AND-chain drops every NULL-project row for that app — including
+    // real work that was never ignored (Cursor Agents, untitled windows).
+    clauses.push(`NOT (${prefix}app_name = ? AND ${prefix}project IS NOT NULL AND ${prefix}project = ?)`);
     params.push(p.appName, p.project);
   }
   for (const p of patterns) {
@@ -810,13 +814,14 @@ export function getGoalsProgress(db: Database.Database, period = "today"): GoalP
         .get(range.start, range.end, ...dash.params) as { seconds: number | null };
       current = row.seconds ?? 0;
     } else if (g.type === "tag" && g.tagId != null) {
+      const tf = tagIdFilter(db, g.tagId, true);
       const row = db
         .prepare(
           `SELECT ${SECONDS_EXPR} AS seconds
              FROM entries e
-            WHERE e.timestamp >= ? AND e.timestamp < ? AND e.tag_id = ?${dash.clause}${active}`
+            WHERE e.timestamp >= ? AND e.timestamp < ? AND ${tf.clause}${dash.clause}${active}`
         )
-        .get(range.start, range.end, g.tagId, ...dash.params) as { seconds: number | null };
+        .get(range.start, range.end, ...tf.params, ...dash.params) as { seconds: number | null };
       current = row.seconds ?? 0;
     } else if (g.type === "app" && g.app) {
       const row = db
@@ -828,7 +833,8 @@ export function getGoalsProgress(db: Database.Database, period = "today"): GoalP
         .get(range.start, range.end, g.app, ...dash.params) as { seconds: number | null };
       current = row.seconds ?? 0;
     }
-    const percent = g.targetSeconds > 0 ? (current / g.targetSeconds) * 100 : 0;
+    const rawPercent = g.targetSeconds > 0 ? (current / g.targetSeconds) * 100 : 0;
+    const percent = Math.min(rawPercent, 100);
     return {
       id: g.id,
       type: g.type,
